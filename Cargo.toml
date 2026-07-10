@@ -1,0 +1,27 @@
+[workspace]
+members = ["crates/dlss-core", "crates/dlss-catalog", "crates/dlss-platform", "crates/dlss-app"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+crossbeam-channel = "0.5"
+eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
+egui_extras = "0.35"
+jiff = "0.2"
+object = { version = "0.37", features = ["pe"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+walkdir = "2"
+zip = { version = "5", default-features = false, features = ["deflate"] }
+
+[profile.release]
+lto = "thin"
+strip = true

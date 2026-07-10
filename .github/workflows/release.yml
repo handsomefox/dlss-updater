@@ -1,0 +1,31 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --workspace --release
+      - name: Package Windows release
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/dlss-updater.exe dist/dlss-updater.exe
+          $hash = (Get-FileHash dist/dlss-updater.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  dlss-updater.exe" | Set-Content -Encoding ascii dist/SHA256SUMS
+          Compress-Archive -CompressionLevel Optimal -Path dist/dlss-updater.exe,dist/SHA256SUMS -DestinationPath dist/dlss-updater-windows-x86_64.zip
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/dlss-updater-windows-x86_64.zip
+            dist/SHA256SUMS
