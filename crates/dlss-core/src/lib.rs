@@ -10,9 +10,10 @@ pub use tools::*;
 pub use traits::*;
 pub use workflow::*;
 
+#[must_use]
 pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs() as i64)
+        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
         .unwrap_or_default()
 }

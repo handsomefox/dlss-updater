@@ -758,6 +758,8 @@ dependencies = [
  "jiff",
  "rfd",
  "serde",
+ "tempfile",
+ "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
 ]

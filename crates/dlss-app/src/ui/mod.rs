@@ -1,4 +1,4 @@
-pub mod inspector;
-pub mod table;
-pub mod toolbar;
-pub mod windows;
+pub(crate) mod inspector;
+pub(crate) mod table;
+pub(crate) mod toolbar;
+pub(crate) mod windows;

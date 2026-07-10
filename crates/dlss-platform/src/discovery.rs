@@ -10,6 +10,8 @@ use std::{
 };
 use walkdir::WalkDir;
 
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+#[must_use]
 pub fn is_managed_dll(name: &OsStr) -> bool {
     let Some(name) = name.to_str() else {
         return false;
@@ -29,9 +31,17 @@ pub fn scan_game(
         .follow_links(false)
         .max_depth(12)
         .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file() && is_managed_dll(entry.file_name()))
+        .filter_map(|entry| match entry {
+            Ok(entry) if entry.file_type().is_file() && is_managed_dll(entry.file_name()) => {
+                Some(Ok(entry))
+            }
+            Ok(_) => None,
+            Err(error) => Some(Err(CoreError::Validation(format!(
+                "filesystem traversal failed: {error}"
+            )))),
+        })
         .map(|entry| {
+            let entry = entry?;
             let path = entry.into_path();
             let metadata = inspector.inspect(&path)?;
             let relative = path.strip_prefix(root).unwrap_or(&path);
@@ -46,7 +56,8 @@ pub fn scan_game(
         .collect()
 }
 
-/// Parses legacy and modern Steam KeyValues library formats.
+/// Parses legacy and modern Steam `KeyValues` library formats.
+#[must_use]
 pub fn steam_library_paths(contents: &str) -> Vec<PathBuf> {
     let tokens = quoted_tokens(contents);
     let mut paths = Vec::new();
@@ -63,6 +74,7 @@ pub fn steam_library_paths(contents: &str) -> Vec<PathBuf> {
     deduplicate_roots(paths)
 }
 
+#[must_use]
 pub fn steam_manifests(steamapps: &Path) -> Vec<(String, String, PathBuf)> {
     let Ok(entries) = fs::read_dir(steamapps) else {
         return Vec::new();
@@ -142,6 +154,7 @@ struct EpicManifest {
 }
 
 /// Reads Epic `.item` manifests. A malformed entry never hides valid siblings.
+#[must_use]
 pub fn epic_manifests(directory: &Path) -> Vec<GameInstall> {
     let Ok(entries) = fs::read_dir(directory) else {
         return Vec::new();
@@ -177,6 +190,10 @@ pub fn epic_manifests(directory: &Path) -> Vec<GameInstall> {
         .collect()
 }
 
+/// Creates a stable manual-game record from a canonical directory.
+///
+/// # Errors
+/// Returns an error when the directory cannot be canonicalized.
 pub fn manual_install(root: &Path) -> Result<GameInstall, CoreError> {
     let canonical = root.canonicalize()?;
     let name = canonical
@@ -196,21 +213,25 @@ pub fn manual_install(root: &Path) -> Result<GameInstall, CoreError> {
 
 #[cfg(unix)]
 fn path_key(path: &Path) -> String {
+    use std::fmt::Write as _;
     use std::os::unix::ffi::OsStrExt;
-    path.as_os_str()
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    let bytes = path.as_os_str().as_bytes();
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 #[cfg(windows)]
 fn path_key(path: &Path) -> String {
+    use std::fmt::Write as _;
     use std::os::windows::ffi::OsStrExt;
-    path.as_os_str()
-        .encode_wide()
-        .map(|unit| format!("{unit:04x}"))
-        .collect()
+    let mut encoded = String::new();
+    for unit in path.as_os_str().encode_wide() {
+        write!(encoded, "{unit:04x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -260,6 +281,19 @@ mod tests {
         let game = manual_install(directory.path()).unwrap();
         assert!(game.id.0.starts_with("manual:"));
         assert_eq!(game.root, directory.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn scan_retains_root_traversal_failures() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let results = scan_game(
+            &GameId("manual:test".into()),
+            &missing,
+            &crate::PortablePeInspector,
+        );
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_err());
     }
 
     #[cfg(unix)]

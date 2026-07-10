@@ -1,13 +1,21 @@
 //! Windows implementations. All registry paths are compile-time constants and
 //! elevated plans can select only the allowlisted tool ID.
 
-use dlss_core::*;
+use dlss_core::{
+    AtomicFileReplacer, BackupStore, BatchResult, CoreError, DLSS_INDICATOR_TOOL_ID, DllInspector,
+    DllMetadata, DllVersion, ElevatedFilePlan, ElevatedHelperPlan, GameId, GameInstall,
+    GameLocator, KnownDirectories, PlatformCapabilities, PrivilegeBroker, RegistryValueSnapshot,
+    RegistryView, SignatureStatus, StoreKind, SystemToolDefinition, SystemToolId,
+    SystemToolProvider, SystemToolScope, SystemToolState, ToolChangePlan, ToolChangeResult,
+    ToolRestorePoint, TrustVerifier, execute_plan, hash_file, indicator_state, now_unix,
+    read_versioned_json, write_versioned_json,
+};
 use object::Object;
 use sha2::{Digest, Sha256};
 use std::{
     ffi::c_void,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{self, Read, Write},
     os::windows::ffi::OsStrExt,
     path::{Path, PathBuf},
 };
@@ -41,6 +49,7 @@ const NGX_KEY: &str = r"SOFTWARE\NVIDIA Corporation\Global\NGXCore";
 const INDICATOR_VALUE: &str = "ShowDlssIndicator";
 const KEY_WOW64_64KEY: u32 = 0x0100;
 
+#[must_use]
 pub fn capabilities() -> PlatformCapabilities {
     PlatformCapabilities {
         game_discovery: true,
@@ -56,15 +65,15 @@ fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 
-fn windows_error(error: windows::core::Error) -> CoreError {
+fn windows_error(error: &windows::core::Error) -> CoreError {
     CoreError::Validation(error.to_string())
 }
 
 /// Like `windows_error`, but classifies "access denied" structurally so the app
 /// can offer elevation instead of matching localized error strings.
-fn replace_error(error: windows::core::Error) -> CoreError {
+fn replace_error(error: &windows::core::Error) -> CoreError {
     // HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED) == E_ACCESSDENIED (0x80070005).
-    const E_ACCESSDENIED: i32 = 0x8007_0005u32 as i32;
+    const E_ACCESSDENIED: i32 = 0x8007_0005u32.cast_signed();
     if error.code().0 == E_ACCESSDENIED {
         CoreError::PermissionDenied
     } else {
@@ -72,9 +81,9 @@ fn replace_error(error: windows::core::Error) -> CoreError {
     }
 }
 
-fn shell_execute_error(error: windows::core::Error) -> CoreError {
+fn shell_execute_error(error: &windows::core::Error) -> CoreError {
     // HRESULT_FROM_WIN32(ERROR_CANCELLED), returned when the user dismisses UAC.
-    const HRESULT_CANCELLED: i32 = 0x8007_04c7u32 as i32;
+    const HRESULT_CANCELLED: i32 = 0x8007_04c7u32.cast_signed();
     if error.code().0 == HRESULT_CANCELLED {
         CoreError::Cancelled
     } else {
@@ -206,29 +215,33 @@ fn file_version(path: &Path) -> Result<Option<DllVersion>, CoreError> {
         if size == 0 {
             return Ok(None);
         }
-        let mut data = vec![0_u8; size as usize];
+        let data_len = usize::try_from(size)
+            .map_err(|_| CoreError::Validation("version resource is too large".into()))?;
+        let mut data = vec![0_u8; data_len];
         GetFileVersionInfoW(PCWSTR(path.as_ptr()), None, size, data.as_mut_ptr().cast())
-            .map_err(windows_error)?;
+            .map_err(|error| windows_error(&error))?;
         let mut info: *mut c_void = std::ptr::null_mut();
         let mut length = 0_u32;
         if !VerQueryValueW(
             data.as_ptr().cast(),
             windows::core::w!("\\"),
-            &mut info,
-            &mut length,
+            &raw mut info,
+            &raw mut length,
         )
         .as_bool()
             || info.is_null()
-            || length < size_of::<VS_FIXEDFILEINFO>() as u32
+            || length
+                < u32::try_from(size_of::<VS_FIXEDFILEINFO>())
+                    .map_err(|_| CoreError::Validation("version structure is too large".into()))?
         {
             return Ok(None);
         }
         let fixed = &*info.cast::<VS_FIXEDFILEINFO>();
         Ok(Some(DllVersion::new(
-            (fixed.dwFileVersionMS >> 16) as u16,
-            fixed.dwFileVersionMS as u16,
-            (fixed.dwFileVersionLS >> 16) as u16,
-            fixed.dwFileVersionLS as u16,
+            u16::try_from(fixed.dwFileVersionMS >> 16).unwrap_or_default(),
+            u16::try_from(fixed.dwFileVersionMS & 0xffff).unwrap_or_default(),
+            u16::try_from(fixed.dwFileVersionLS >> 16).unwrap_or_default(),
+            u16::try_from(fixed.dwFileVersionLS & 0xffff).unwrap_or_default(),
         )))
     }
 }
@@ -238,18 +251,24 @@ pub struct WindowsTrustVerifier;
 impl TrustVerifier for WindowsTrustVerifier {
     fn verify(&self, path: &Path) -> Result<SignatureStatus, CoreError> {
         let path = wide(path);
+        let file_size = u32::try_from(size_of::<WINTRUST_FILE_INFO>())
+            .map_err(|_| CoreError::Validation("trust file structure is too large".into()))?;
+        let data_size = u32::try_from(size_of::<WINTRUST_DATA>())
+            .map_err(|_| CoreError::Validation("trust data structure is too large".into()))?;
         let mut file = WINTRUST_FILE_INFO {
-            cbStruct: size_of::<WINTRUST_FILE_INFO>() as u32,
+            cbStruct: file_size,
             pcwszFilePath: PCWSTR(path.as_ptr()),
             hFile: HANDLE::default(),
             pgKnownSubject: std::ptr::null_mut(),
         };
         let mut data = WINTRUST_DATA {
-            cbStruct: size_of::<WINTRUST_DATA>() as u32,
+            cbStruct: data_size,
             dwUIChoice: WTD_UI_NONE,
             fdwRevocationChecks: WTD_REVOKE_NONE,
             dwUnionChoice: WTD_CHOICE_FILE,
-            Anonymous: WINTRUST_DATA_0 { pFile: &mut file },
+            Anonymous: WINTRUST_DATA_0 {
+                pFile: &raw mut file,
+            },
             dwStateAction: WTD_STATEACTION_VERIFY,
             ..Default::default()
         };
@@ -257,17 +276,9 @@ impl TrustVerifier for WindowsTrustVerifier {
         // SAFETY: structures and path storage remain alive for both calls. Provider
         // state is always closed after verification, including failed verification.
         let status = unsafe {
-            let status = WinVerifyTrust(
-                HWND::default(),
-                &mut action,
-                (&mut data as *mut WINTRUST_DATA).cast(),
-            );
+            let status = WinVerifyTrust(HWND::default(), &raw mut action, (&raw mut data).cast());
             data.dwStateAction = WTD_STATEACTION_CLOSE;
-            let _ = WinVerifyTrust(
-                HWND::default(),
-                &mut action,
-                (&mut data as *mut WINTRUST_DATA).cast(),
-            );
+            let _ = WinVerifyTrust(HWND::default(), &raw mut action, (&raw mut data).cast());
             status
         };
         Ok(if status == 0 {
@@ -295,8 +306,8 @@ impl KnownDirectories for WindowsKnownDirectories {
 fn known_folder(id: &windows::core::GUID) -> Result<PathBuf, CoreError> {
     // SAFETY: the returned COM allocation is converted before being freed once.
     unsafe {
-        let value =
-            SHGetKnownFolderPath(id, KNOWN_FOLDER_FLAG::default(), None).map_err(windows_error)?;
+        let value = SHGetKnownFolderPath(id, KNOWN_FOLDER_FLAG::default(), None)
+            .map_err(|error| windows_error(&error))?;
         let path = PathBuf::from(
             value
                 .to_string()
@@ -316,20 +327,26 @@ impl AtomicFileReplacer for WindowsAtomicFileReplacer {
         source: &Path,
         expected_source_hash: [u8; 32],
     ) -> Result<(), CoreError> {
-        if dlss_core::hash_file(source)? != expected_source_hash {
+        if hash_file(source)? != expected_source_hash {
             return Err(CoreError::Validation("cached source hash changed".into()));
         }
-        let stage = target.with_extension(format!("dll.dlss-stage-{}", std::process::id()));
+        let stage = target.with_extension(format!(
+            "dll.dlss-stage-{}-{:032x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
         let result = (|| {
             let mut input = File::open(source)?;
             let mut output = OpenOptions::new()
                 .create_new(true)
                 .write(true)
                 .open(&stage)?;
-            std::io::copy(&mut input, &mut output)?;
+            io::copy(&mut input, &mut output)?;
             output.flush()?;
             output.sync_all()?;
-            if dlss_core::hash_file(&stage)? != expected_source_hash {
+            if hash_file(&stage)? != expected_source_hash {
                 return Err(CoreError::Validation("staged source hash mismatch".into()));
             }
             let target_wide = wide(target);
@@ -344,7 +361,7 @@ impl AtomicFileReplacer for WindowsAtomicFileReplacer {
                     None,
                     None,
                 )
-                .map_err(replace_error)
+                .map_err(|error| replace_error(&error))
             }
         })();
         if stage.exists() {
@@ -362,8 +379,10 @@ impl PrivilegeBroker for WindowsPrivilegeBroker {
         let executable = wide(&executable);
         let parameters = format!("--elevated-helper \"{}\"", plan.display());
         let parameters: Vec<u16> = parameters.encode_utf16().chain(Some(0)).collect();
+        let execute_size = u32::try_from(size_of::<SHELLEXECUTEINFOW>())
+            .map_err(|_| CoreError::Validation("shell structure is too large".into()))?;
         let mut execute = SHELLEXECUTEINFOW {
-            cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+            cbSize: execute_size,
             fMask: SEE_MASK_NOCLOSEPROCESS,
             lpVerb: windows::core::w!("runas"),
             lpFile: PCWSTR(executable.as_ptr()),
@@ -374,7 +393,7 @@ impl PrivilegeBroker for WindowsPrivilegeBroker {
         // SAFETY: all strings are NUL-terminated and the returned process handle
         // is retained until completion, then closed exactly once.
         unsafe {
-            ShellExecuteExW(&mut execute).map_err(shell_execute_error)?;
+            ShellExecuteExW(&raw mut execute).map_err(|error| shell_execute_error(&error))?;
             if execute.hProcess.is_invalid() {
                 return Err(CoreError::Cancelled);
             }
@@ -383,7 +402,7 @@ impl PrivilegeBroker for WindowsPrivilegeBroker {
             if wait == WAIT_FAILED {
                 return Err(CoreError::Validation("elevated helper wait failed".into()));
             }
-            close.map_err(windows_error)?;
+            close.map_err(|error| windows_error(&error))?;
         }
         Ok(())
     }
@@ -392,24 +411,25 @@ impl PrivilegeBroker for WindowsPrivilegeBroker {
 pub struct NvidiaSystemTools;
 
 impl NvidiaSystemTools {
+    /// Captures the current registry value without interpreting its type.
+    ///
+    /// # Errors
+    /// Returns an error when an existing value cannot be decoded.
     pub fn current_snapshot(&self) -> Result<RegistryValueSnapshot, CoreError> {
         let captured_unix = now_unix();
-        let key = match LOCAL_MACHINE
+        let Ok(key) = LOCAL_MACHINE
             .options()
             .read()
             .access(KEY_WOW64_64KEY)
             .open(NGX_KEY)
-        {
-            Ok(key) => key,
-            Err(_) => {
-                return Ok(RegistryValueSnapshot {
-                    existed: false,
-                    registry_view: RegistryView::View64,
-                    registry_type: None,
-                    raw: Vec::new(),
-                    captured_unix,
-                });
-            }
+        else {
+            return Ok(RegistryValueSnapshot {
+                existed: false,
+                registry_view: RegistryView::View64,
+                registry_type: None,
+                raw: Vec::new(),
+                captured_unix,
+            });
         };
         match key.get_value(INDICATOR_VALUE) {
             Ok(value) => Ok(RegistryValueSnapshot {
@@ -429,7 +449,7 @@ impl NvidiaSystemTools {
         }
     }
 
-    fn writable_key(&self) -> Result<windows_registry::Key, CoreError> {
+    fn writable_key() -> Result<windows_registry::Key, CoreError> {
         LOCAL_MACHINE
             .options()
             .read()
@@ -479,7 +499,7 @@ impl SystemToolProvider for NvidiaSystemTools {
             SystemToolState::DlssIndicatorProduction => 1024,
             _ => return Err(CoreError::Validation("unsupported indicator state".into())),
         };
-        self.writable_key()?
+        Self::writable_key()?
             .set_u32(INDICATOR_VALUE, value)
             .map_err(|error| CoreError::Validation(error.to_string()))?;
         let after = self.current_snapshot()?;
@@ -509,7 +529,7 @@ impl SystemToolProvider for NvidiaSystemTools {
         {
             return Err(CoreError::StalePlan);
         }
-        let key = self.writable_key()?;
+        let key = Self::writable_key()?;
         if point.snapshot.existed {
             let registry_type = point
                 .snapshot
@@ -552,15 +572,36 @@ fn snapshot_state(snapshot: &RegistryValueSnapshot) -> SystemToolState {
     )))
 }
 
+#[must_use]
 pub fn snapshot_hash(snapshot: &RegistryValueSnapshot) -> [u8; 32] {
-    let mut stable = snapshot.clone();
-    stable.captured_unix = 0;
-    let encoded = serde_json::to_vec(&stable).expect("registry snapshot is serializable");
-    Sha256::digest(encoded).into()
+    let mut hasher = Sha256::new();
+    hasher.update([u8::from(snapshot.existed)]);
+    hasher.update([match snapshot.registry_view {
+        RegistryView::View32 => 32,
+        RegistryView::View64 => 64,
+    }]);
+    match snapshot.registry_type {
+        Some(registry_type) => {
+            hasher.update([1]);
+            hasher.update(registry_type.to_le_bytes());
+        }
+        None => hasher.update([0]),
+    }
+    hasher.update(
+        u64::try_from(snapshot.raw.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
+    hasher.update(&snapshot.raw);
+    hasher.finalize().into()
 }
 
 /// Elevated entry point. The caller supplies only a plan file; registry paths
 /// are resolved above from the allowlisted tool ID.
+///
+/// # Errors
+/// Returns an error when helper paths, the serialized plan, independent plan
+/// validation, execution, or result persistence fails.
 pub fn run_elevated_helper(plan_path: &Path) -> Result<(), CoreError> {
     tracing::info!(plan = %plan_path.display(), "elevated helper started");
     let local = WindowsKnownDirectories.local_app_data()?;
@@ -576,7 +617,7 @@ pub fn run_elevated_helper(plan_path: &Path) -> Result<(), CoreError> {
             "helper plan is outside the private plan directory".into(),
         ));
     }
-    let plan: ElevatedHelperPlan = dlss_core::read_versioned_json(&canonical_plan, 1)?;
+    let plan: ElevatedHelperPlan = read_versioned_json(&canonical_plan, 1)?;
     let result = match plan {
         ElevatedHelperPlan::SystemTool(plan) => {
             // Validate the result path before doing anything else so that any
@@ -598,24 +639,24 @@ pub fn run_elevated_helper(plan_path: &Path) -> Result<(), CoreError> {
                         .map_err(|error| error.to_string())
                 }
             })();
-            dlss_core::write_versioned_json(&plan.result_path, 1, &outcome)
+            write_versioned_json(&plan.result_path, 1, &outcome)
         }
         ElevatedHelperPlan::FileSwap(plan) => {
             validate_helper_paths(&plan.nonce, &plan.result_path, &result_directory)?;
-            let outcome: Result<dlss_core::BatchResult, String> = (|| {
+            let outcome: Result<BatchResult, String> = (|| {
                 if plan.operation.nonce != plan.nonce {
                     return Err("file plan nonce mismatch".into());
                 }
                 validate_file_plan(&plan, &base).map_err(|error| error.to_string())?;
-                Ok(dlss_core::execute_plan(
+                Ok(execute_plan(
                     &plan.operation,
                     &WindowsDllInspector,
                     &WindowsAtomicFileReplacer,
-                    &dlss_core::BackupStore::new(base.join("backups")),
+                    &BackupStore::new(base.join("backups")),
                     now_unix(),
                 ))
             })();
-            dlss_core::write_versioned_json(&plan.result_path, 1, &outcome)
+            write_versioned_json(&plan.result_path, 1, &outcome)
         }
     };
     match &result {
@@ -671,7 +712,7 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<(), CoreEr
             || backups
                 .as_ref()
                 .is_some_and(|root| source.starts_with(root));
-        if !trusted_source || dlss_core::hash_file(&source)? != swap.source_sha256 {
+        if !trusted_source || hash_file(&source)? != swap.source_sha256 {
             return Err(CoreError::Validation(
                 "source is outside the validated cache".into(),
             ));

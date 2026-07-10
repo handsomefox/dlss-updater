@@ -8,23 +8,23 @@ impl DlssApp {
             ui.heading("DLSS Updater");
             if let Some(release) = &self.catalog_release {
                 ui.weak(format!("Official {release}"));
-            } else if self.catalog_loading {
+            } else if self.runtime.catalog_loading {
                 ui.spinner();
                 ui.weak("Loading catalog");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Tools").clicked() {
-                    self.show_tools = true;
+                    self.open_windows.insert(super::super::AppWindow::Tools);
                     self.refresh_tool_state();
                 }
                 if ui.button("Releases").clicked() {
-                    self.show_releases = true;
+                    self.open_windows.insert(super::super::AppWindow::Releases);
                 }
                 if ui.button("Activity").clicked() {
-                    self.show_activity = true;
+                    self.open_windows.insert(super::super::AppWindow::Activity);
                 }
                 if ui.button("Game folders").clicked() {
-                    self.show_roots = true;
+                    self.open_windows.insert(super::super::AppWindow::Roots);
                 }
                 if matches!(
                     self.tool_state,
@@ -77,12 +77,12 @@ impl DlssApp {
                     ui.selectable_value(&mut self.store_filter, StoreFilter::Manual, "Manual");
                 });
             if ui
-                .add_enabled(!self.scanning, egui::Button::new("Rescan"))
+                .add_enabled(!self.runtime.scanning, egui::Button::new("Rescan"))
                 .clicked()
             {
                 let _ = self.worker.commands.send(Command::Scan);
             }
-            if self.scanning {
+            if self.runtime.scanning {
                 ui.spinner();
                 ui.weak("Scanning…");
             }

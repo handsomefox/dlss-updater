@@ -45,6 +45,8 @@ pub enum GithubError {
     TooLarge,
     #[error("download digest mismatch")]
     DigestMismatch,
+    #[error("download size mismatch: expected {expected} bytes, received {actual} bytes")]
+    SizeMismatch { expected: u64, actual: u64 },
     #[error("invalid SHA-256 digest")]
     InvalidDigest,
     #[error("too many GitHub release pages")]
@@ -63,6 +65,10 @@ pub struct DownloadProgress {
 }
 
 impl GithubCatalogClient {
+    /// Creates the constrained official-release HTTP client.
+    ///
+    /// # Errors
+    /// Returns an error when the HTTP client cannot be constructed.
     pub fn new() -> Result<Self, GithubError> {
         // `reqwest/rustls-no-provider` leaves provider selection to the
         // application. Installing ring is idempotent; an error only means a
@@ -88,6 +94,10 @@ impl GithubCatalogClient {
         Ok(client)
     }
 
+    /// Refreshes all pages of official release metadata.
+    ///
+    /// # Errors
+    /// Returns an error for transport, status, decoding, or pagination failures.
     pub fn refresh(&self, previous_etag: Option<&str>) -> Result<ReleaseRefresh, GithubError> {
         tracing::info!(etag = previous_etag, "refreshing GitHub release catalog");
         let mut url = Some(self.releases_url.clone());
@@ -137,14 +147,10 @@ impl GithubCatalogClient {
         Ok(ReleaseRefresh::Modified { etag, assets })
     }
 
-    pub fn download(
-        &self,
-        asset: &OfficialAsset,
-        destination: &Path,
-    ) -> Result<PathBuf, GithubError> {
-        self.download_with_progress(asset, destination, |_| {})
-    }
-
+    /// Downloads and validates one official archive while reporting progress.
+    ///
+    /// # Errors
+    /// Returns an error for transport, size, digest, or persistence failures.
     pub fn download_with_progress(
         &self,
         asset: &OfficialAsset,
@@ -169,9 +175,16 @@ impl GithubCatalogClient {
             let message = response.text().unwrap_or_default();
             return Err(GithubError::Status { status, message });
         }
-        let total = response
-            .content_length()
-            .or((asset.size > 0).then_some(asset.size));
+        let response_size = response.content_length();
+        if let (Some(actual), true) = (response_size, asset.size > 0)
+            && actual != asset.size
+        {
+            return Err(GithubError::SizeMismatch {
+                expected: asset.size,
+                actual,
+            });
+        }
+        let total = response_size.or((asset.size > 0).then_some(asset.size));
         if total.is_some_and(|size| size > MAX_ARCHIVE_BYTES) {
             return Err(GithubError::TooLarge);
         }
@@ -179,9 +192,18 @@ impl GithubCatalogClient {
         let result = (|| {
             let mut output = File::create(&temporary)?;
             let mut received = 0_u64;
-            let mut buffer = [0_u8; 64 * 1024];
+            let mut buffer = vec![0_u8; 64 * 1024];
             loop {
-                let read = response.read(&mut buffer)?;
+                let read = match response.read(&mut buffer) {
+                    Ok(read) => read,
+                    Err(_error) if total.is_some() => {
+                        return Err(GithubError::SizeMismatch {
+                            expected: total.unwrap_or_default(),
+                            actual: received,
+                        });
+                    }
+                    Err(error) => return Err(error.into()),
+                };
                 if read == 0 {
                     break;
                 }
@@ -194,6 +216,14 @@ impl GithubCatalogClient {
             }
             output.flush()?;
             output.sync_all()?;
+            if let Some(expected) = total
+                && received != expected
+            {
+                return Err(GithubError::SizeMismatch {
+                    expected,
+                    actual: received,
+                });
+            }
             if let Some(expected) = asset.digest
                 && sha256_file(&temporary)? != expected
             {
@@ -209,6 +239,30 @@ impl GithubCatalogClient {
         tracing::info!(release = %asset.release.tag, path = %destination.display(), "release archive downloaded");
         Ok(destination.to_owned())
     }
+}
+
+/// Revalidates a cached archive against its release metadata.
+///
+/// # Errors
+/// Returns an error when the file is missing, oversized, truncated, or has a
+/// different digest.
+pub fn validate_cached_archive(asset: &OfficialAsset, path: &Path) -> Result<(), GithubError> {
+    let actual = path.metadata()?.len();
+    if actual > MAX_ARCHIVE_BYTES {
+        return Err(GithubError::TooLarge);
+    }
+    if asset.size > 0 && actual != asset.size {
+        return Err(GithubError::SizeMismatch {
+            expected: asset.size,
+            actual,
+        });
+    }
+    if let Some(expected) = asset.digest
+        && sha256_file(path)? != expected
+    {
+        return Err(GithubError::DigestMismatch);
+    }
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -230,6 +284,7 @@ struct ApiAsset {
     digest: Option<String>,
 }
 
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn select_asset(release: ApiRelease) -> Option<OfficialAsset> {
     if release.draft || release.prerelease {
         return None;
@@ -247,7 +302,7 @@ fn select_asset(release: ApiRelease) -> Option<OfficialAsset> {
             published_unix: release
                 .published_at
                 .parse::<jiff::Timestamp>()
-                .map(|timestamp| timestamp.as_second())
+                .map(jiff::Timestamp::as_second)
                 .unwrap_or_default(),
         },
         download_url: asset.browser_download_url,
@@ -463,9 +518,11 @@ mod tests {
             ..asset.clone()
         };
         assert!(matches!(
-            GithubCatalogClient::new()
-                .unwrap()
-                .download(&too_large, &directory.path().join("too-large.zip")),
+            GithubCatalogClient::new().unwrap().download_with_progress(
+                &too_large,
+                &directory.path().join("too-large.zip"),
+                |_| {}
+            ),
             Err(GithubError::TooLarge)
         ));
 
@@ -476,11 +533,66 @@ mod tests {
             ..asset
         };
         assert!(matches!(
-            GithubCatalogClient::new()
-                .unwrap()
-                .download(&wrong_digest, &directory.path().join("wrong.zip")),
+            GithubCatalogClient::new().unwrap().download_with_progress(
+                &wrong_digest,
+                &directory.path().join("wrong.zip"),
+                |_| {}
+            ),
             Err(GithubError::DigestMismatch)
         ));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn download_rejects_metadata_and_response_size_disagreement() {
+        let body = b"short";
+        let (base, _, server) = mock_server(|_| vec![response("200 OK", &[], body)]);
+        let asset = OfficialAsset {
+            release: ReleaseMetadata {
+                id: ReleaseId("v1".into()),
+                tag: "v1".into(),
+                asset_name: "streamline-sdk-v1.zip".into(),
+                published_unix: 1,
+            },
+            download_url: base,
+            size: body.len() as u64 + 1,
+            digest: None,
+        };
+        let directory = tempdir().unwrap();
+        let error = GithubCatalogClient::new()
+            .unwrap()
+            .download_with_progress(&asset, &directory.path().join("archive.zip"), |_| {})
+            .unwrap_err();
+        server.join().unwrap();
+        assert!(matches!(error, GithubError::SizeMismatch { .. }));
+    }
+
+    #[test]
+    fn cached_archive_revalidates_size_and_digest() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("archive.zip");
+        fs::write(&path, b"valid").unwrap();
+        let asset = OfficialAsset {
+            release: ReleaseMetadata {
+                id: ReleaseId("v1".into()),
+                tag: "v1".into(),
+                asset_name: "streamline-sdk-v1.zip".into(),
+                published_unix: 1,
+            },
+            download_url: String::new(),
+            size: 5,
+            digest: Some(Sha256::digest(b"valid").into()),
+        };
+        validate_cached_archive(&asset, &path).unwrap();
+        fs::write(&path, b"tampr").unwrap();
+        assert!(matches!(
+            validate_cached_archive(&asset, &path),
+            Err(GithubError::DigestMismatch)
+        ));
+        fs::write(&path, b"shorter").unwrap();
+        assert!(matches!(
+            validate_cached_archive(&asset, &path),
+            Err(GithubError::SizeMismatch { .. })
+        ));
     }
 }

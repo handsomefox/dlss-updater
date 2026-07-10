@@ -7,7 +7,29 @@ use dlss_core::{DllInspector, GameId, GameInstall, ReleaseId, TargetProfile};
 use dlss_core::{GameLocator, KnownDirectories, PrivilegeBroker};
 use std::{collections::HashMap, path::PathBuf, thread};
 
-pub enum Command {
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum WorkerError {
+    #[error(transparent)]
+    Core(#[from] dlss_core::CoreError),
+    #[error(transparent)]
+    Catalog(#[from] dlss_catalog::CatalogError),
+    #[error(transparent)]
+    Github(#[from] dlss_catalog::GithubError),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[cfg(not(windows))]
+    #[error("{0}")]
+    Unavailable(&'static str),
+    #[error("invalid worker state: {0}")]
+    State(String),
+    #[cfg(windows)]
+    #[error("elevation failed: {0}")]
+    Elevation(String),
+}
+
+type WorkerResult<T> = Result<T, WorkerError>;
+
+pub(crate) enum Command {
     Scan,
     RefreshCatalog,
     InspectRelease(ReleaseId),
@@ -15,9 +37,7 @@ pub enum Command {
     ApplyProfile(GameId, TargetProfile),
     UndoLast(GameId),
     AddRoot(PathBuf),
-    RemoveRoot(PathBuf),
-    // Constructed only in Windows builds; the field is still read cross-platform.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg(windows)]
     ChangeIndicator(IndicatorRequest),
     Shutdown,
 }
@@ -25,8 +45,8 @@ pub enum Command {
 /// A prepared request to change the DLSS indicator. The caller performs the
 /// stale-hash confirmation on the UI thread and passes the resolved parameters
 /// here so the slow, blocking elevation runs off the UI thread.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub struct IndicatorRequest {
+#[cfg(windows)]
+pub(crate) struct IndicatorRequest {
     pub desired: dlss_core::SystemToolState,
     /// A restore point to roll back to; `None` requests applying `desired`.
     pub restore_point: Option<dlss_core::ToolRestorePoint>,
@@ -34,7 +54,7 @@ pub struct IndicatorRequest {
     pub allow_stale_restore: bool,
 }
 
-pub struct UpgradeReport {
+pub(crate) struct UpgradeReport {
     pub changed: usize,
     pub failed: usize,
     pub release: String,
@@ -43,17 +63,18 @@ pub struct UpgradeReport {
     undo_plan: Option<dlss_core::OperationPlan>,
 }
 
-pub struct CatalogSnapshot {
+pub(crate) struct CatalogSnapshot {
     pub latest: Option<String>,
     pub releases: Vec<dlss_core::CachedRelease>,
 }
 
-pub enum Event {
+pub(crate) enum Event {
+    Warning(String),
     ScanStarted,
-    ScanFinished(Result<Vec<GameInstall>, String>),
+    ScanFinished(WorkerResult<Vec<GameInstall>>),
     CatalogStarted,
-    CatalogFinished(Result<CatalogSnapshot, String>),
-    ReleaseFinished(Result<dlss_core::CachedRelease, String>),
+    CatalogFinished(WorkerResult<CatalogSnapshot>),
+    ReleaseFinished(WorkerResult<dlss_core::CachedRelease>),
     ReleaseProgress {
         id: ReleaseId,
         state: dlss_core::ReleaseState,
@@ -64,14 +85,15 @@ pub enum Event {
     UpgradeFinished {
         game_id: GameId,
         game: Option<GameInstall>,
-        result: Result<UpgradeReport, String>,
+        result: WorkerResult<UpgradeReport>,
     },
-    IndicatorFinished(Result<dlss_core::ToolChangeResult, String>),
+    #[cfg(windows)]
+    IndicatorFinished(WorkerResult<dlss_core::ToolChangeResult>),
 }
 
-pub struct Worker {
-    pub commands: Sender<Command>,
-    pub events: Receiver<Event>,
+pub(crate) struct Worker {
+    pub(crate) commands: Sender<Command>,
+    pub(crate) events: Receiver<Event>,
 }
 
 /// Wraps the event channel so every send also wakes the egui UI thread. Without
@@ -91,7 +113,7 @@ impl EventSink {
 }
 
 impl Worker {
-    pub fn start(custom_roots: Vec<PathBuf>, ctx: eframe::egui::Context) -> Self {
+    pub(crate) fn start(custom_roots: Vec<PathBuf>, ctx: eframe::egui::Context) -> Self {
         let (commands_tx, commands_rx) = unbounded();
         let (events_tx, events_rx) = unbounded();
         let events = EventSink {
@@ -100,7 +122,7 @@ impl Worker {
         };
         thread::Builder::new()
             .name("dlss-background-worker".into())
-            .spawn(move || run(commands_rx, events, custom_roots))
+            .spawn(move || run(&commands_rx, &events, custom_roots))
             .expect("background worker thread can start");
         Self {
             commands: commands_tx,
@@ -109,209 +131,276 @@ impl Worker {
     }
 }
 
-fn run(commands: Receiver<Command>, events: EventSink, mut roots: Vec<PathBuf>) {
-    let mut games: Vec<GameInstall> = Vec::new();
+struct WorkerState {
+    roots: Vec<PathBuf>,
+    games: Vec<GameInstall>,
+    catalog_path: Option<PathBuf>,
+    catalog: CatalogCacheIndex,
+    assets: Vec<OfficialAsset>,
+    undo_plans: HashMap<GameId, dlss_core::OperationPlan>,
+}
+
+fn run(commands: &Receiver<Command>, events: &EventSink, mut roots: Vec<PathBuf>) {
+    canonicalize_roots(&mut roots);
     let catalog_path = catalog_index_path();
-    let mut catalog = catalog_path
+    let catalog = match catalog_path
         .as_deref()
         .map(CatalogCacheIndex::load)
         .transpose()
-        .unwrap_or_default()
-        .unwrap_or_default();
-    let mut assets = catalog.assets.clone();
-    let mut undo_plans = HashMap::new();
+    {
+        Ok(catalog) => catalog.unwrap_or_default(),
+        Err(error) => {
+            events.send(Event::Warning(format!(
+                "Could not load the saved release catalog: {error}"
+            )));
+            CatalogCacheIndex::default()
+        }
+    };
+    let mut state = WorkerState {
+        roots,
+        games: Vec::new(),
+        catalog_path,
+        assets: catalog.assets.clone(),
+        catalog,
+        undo_plans: HashMap::new(),
+    };
     while let Ok(command) = commands.recv() {
-        let command_name = match &command {
-            Command::Scan => "scan",
-            Command::RefreshCatalog => "refresh_catalog",
-            Command::InspectRelease(_) => "inspect_release",
-            Command::UpgradeLatest(_) => "upgrade_latest",
-            Command::ApplyProfile(_, _) => "apply_profile",
-            Command::UndoLast(_) => "undo_last",
-            Command::AddRoot(_) => "add_root",
-            Command::RemoveRoot(_) => "remove_root",
-            Command::ChangeIndicator(_) => "change_indicator",
-            Command::Shutdown => "shutdown",
-        };
-        let span = tracing::info_span!("worker_command", command = command_name);
+        let span = tracing::info_span!("worker_command", command = command_name(&command));
         let _entered = span.enter();
         tracing::info!("worker command started");
-        match command {
-            Command::Scan => scan(&events, &roots, &mut games),
-            Command::RefreshCatalog => {
-                refresh_catalog(&events, &mut assets, &mut catalog, catalog_path.as_deref())
-            }
-            Command::InspectRelease(release_id) => {
-                let progress_events = events.clone();
-                let progress_id = release_id.clone();
-                let result = assets
-                    .iter()
-                    .find(|asset| asset.release.id == release_id)
-                    .ok_or_else(|| "release is no longer in the official index".to_owned())
-                    .and_then(|asset| {
-                        inspect_release(asset, |state, received, total| {
-                            progress_events.send(Event::ReleaseProgress {
-                                id: progress_id.clone(),
-                                state,
-                                received,
-                                total,
-                            });
-                        })
-                    });
-                if result.is_err() {
-                    events.send(Event::ReleaseProgress {
-                        id: release_id,
-                        state: dlss_core::ReleaseState::Invalid,
-                        received: 0,
-                        total: None,
-                    });
-                }
-                if let Ok(release) = &result {
-                    catalog.upsert_release(release.clone());
-                    if let Some(path) = &catalog_path {
-                        let _ = catalog.save(path);
-                    }
-                }
-                events.send(Event::ReleaseFinished(result));
-            }
-            Command::UpgradeLatest(game_id) => {
-                events.send(Event::UpgradeStarted(game_id.clone()));
-                let Some(game) = games.iter().find(|game| game.id == game_id).cloned() else {
-                    events.send(Event::UpgradeFinished {
-                        game_id,
-                        game: None,
-                        result: Err("game is no longer present in the scan".into()),
-                    });
-                    continue;
-                };
-                let progress_events = events.clone();
-                let result = latest_asset(&assets)
-                    .ok_or_else(|| "official release metadata is not available".to_owned())
-                    .and_then(|asset| {
-                        let id = asset.release.id.clone();
-                        upgrade_game(&game, asset, |state, received, total| {
-                            progress_events.send(Event::ReleaseProgress {
-                                id: id.clone(),
-                                state,
-                                received,
-                                total,
-                            });
-                        })
-                    });
-                if let Ok(report) = &result
-                    && let Some(plan) = &report.undo_plan
-                {
-                    undo_plans.insert(game_id.clone(), plan.clone());
-                }
-                let rescanned = rescan_game(game).ok();
-                if let Some(fresh) = &rescanned
-                    && let Some(existing) = games.iter_mut().find(|game| game.id == fresh.id)
-                {
-                    *existing = fresh.clone();
-                }
-                events.send(Event::UpgradeFinished {
-                    game_id,
-                    game: rescanned,
-                    result,
-                });
-            }
-            Command::ApplyProfile(game_id, profile) => {
-                events.send(Event::UpgradeStarted(game_id.clone()));
-                let Some(game) = games.iter().find(|game| game.id == game_id).cloned() else {
-                    events.send(Event::UpgradeFinished {
-                        game_id,
-                        game: None,
-                        result: Err("game is no longer present in the scan".into()),
-                    });
-                    continue;
-                };
-                let progress_events = events.clone();
-                let result = latest_asset(&assets)
-                    .ok_or_else(|| "official release metadata is not available".to_owned())
-                    .and_then(|asset| {
-                        let cached: Vec<_> = catalog
-                            .releases
-                            .iter()
-                            .flat_map(|release| release.dlls.iter().cloned())
-                            .collect();
-                        let id = asset.release.id.clone();
-                        apply_profile(&game, asset, &cached, &profile, |state, received, total| {
-                            progress_events.send(Event::ReleaseProgress {
-                                id: id.clone(),
-                                state,
-                                received,
-                                total,
-                            });
-                        })
-                    });
-                if let Ok(report) = &result
-                    && let Some(plan) = &report.undo_plan
-                {
-                    undo_plans.insert(game_id.clone(), plan.clone());
-                }
-                let rescanned = rescan_game(game).ok();
-                if let Some(fresh) = &rescanned
-                    && let Some(existing) = games.iter_mut().find(|game| game.id == fresh.id)
-                {
-                    *existing = fresh.clone();
-                }
-                events.send(Event::UpgradeFinished {
-                    game_id,
-                    game: rescanned,
-                    result,
-                });
-            }
-            Command::UndoLast(game_id) => {
-                events.send(Event::UpgradeStarted(game_id.clone()));
-                let Some(game) = games.iter().find(|game| game.id == game_id).cloned() else {
-                    events.send(Event::UpgradeFinished {
-                        game_id,
-                        game: None,
-                        result: Err("game is no longer present in the scan".into()),
-                    });
-                    continue;
-                };
-                let result = undo_plans
-                    .remove(&game_id)
-                    .ok_or_else(|| "the immediate undo plan is no longer available".to_owned())
-                    .and_then(|plan| undo_game(&game, plan));
-                let rescanned = rescan_game(game).ok();
-                if let Some(fresh) = &rescanned
-                    && let Some(existing) = games.iter_mut().find(|game| game.id == fresh.id)
-                {
-                    *existing = fresh.clone();
-                }
-                events.send(Event::UpgradeFinished {
-                    game_id,
-                    game: rescanned,
-                    result,
-                });
-            }
-            Command::AddRoot(root) => {
-                if !roots.contains(&root) {
-                    roots.push(root);
-                }
-                scan(&events, &roots, &mut games);
-            }
-            Command::RemoveRoot(root) => {
-                roots.retain(|candidate| candidate != &root);
-                scan(&events, &roots, &mut games);
-            }
-            Command::ChangeIndicator(request) => {
-                events.send(Event::IndicatorFinished(change_indicator(request)));
-            }
-            Command::Shutdown => break,
+        if !dispatch(command, events, &mut state) {
+            break;
         }
     }
 }
 
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Scan => "scan",
+        Command::RefreshCatalog => "refresh_catalog",
+        Command::InspectRelease(_) => "inspect_release",
+        Command::UpgradeLatest(_) => "upgrade_latest",
+        Command::ApplyProfile(_, _) => "apply_profile",
+        Command::UndoLast(_) => "undo_last",
+        Command::AddRoot(_) => "add_root",
+        #[cfg(windows)]
+        Command::ChangeIndicator(_) => "change_indicator",
+        Command::Shutdown => "shutdown",
+    }
+}
+
+fn dispatch(command: Command, events: &EventSink, state: &mut WorkerState) -> bool {
+    match command {
+        Command::Scan => scan(events, &state.roots, &mut state.games),
+        Command::RefreshCatalog => refresh_catalog(
+            events,
+            &mut state.assets,
+            &mut state.catalog,
+            state.catalog_path.as_deref(),
+        ),
+        Command::InspectRelease(id) => inspect_release_command(id, events, state),
+        Command::UpgradeLatest(id) => upgrade_command(id, events, state),
+        Command::ApplyProfile(id, profile) => profile_command(id, &profile, events, state),
+        Command::UndoLast(id) => undo_command(id, events, state),
+        Command::AddRoot(root) => add_root_command(&root, events, state),
+        #[cfg(windows)]
+        Command::ChangeIndicator(request) => {
+            events.send(Event::IndicatorFinished(change_indicator(request)));
+        }
+        Command::Shutdown => return false,
+    }
+    true
+}
+
+fn inspect_release_command(id: ReleaseId, events: &EventSink, state: &mut WorkerState) {
+    let progress_events = events.clone();
+    let progress_id = id.clone();
+    let result = state
+        .assets
+        .iter()
+        .find(|asset| asset.release.id == id)
+        .ok_or_else(|| WorkerError::State("release is no longer in the official index".into()))
+        .and_then(|asset| {
+            inspect_release(asset, |release_state, received, total| {
+                progress_events.send(Event::ReleaseProgress {
+                    id: progress_id.clone(),
+                    state: release_state,
+                    received,
+                    total,
+                });
+            })
+        });
+    if result.is_err() {
+        events.send(Event::ReleaseProgress {
+            id,
+            state: dlss_core::ReleaseState::Invalid,
+            received: 0,
+            total: None,
+        });
+    }
+    if let Ok(release) = &result {
+        state.catalog.upsert_release(release.clone());
+        if let Some(path) = &state.catalog_path
+            && let Err(error) = state.catalog.save(path)
+        {
+            events.send(Event::Warning(format!(
+                "Release was validated, but the catalog could not be saved: {error}"
+            )));
+        }
+    }
+    events.send(Event::ReleaseFinished(result));
+}
+
+fn upgrade_command(id: GameId, events: &EventSink, state: &mut WorkerState) {
+    let Some(game) = begin_game_operation(&id, events, state) else {
+        return;
+    };
+    let progress_events = events.clone();
+    let result = latest_asset(&state.assets)
+        .ok_or_else(|| WorkerError::State("official release metadata is not available".into()))
+        .and_then(|asset| {
+            let release_id = asset.release.id.clone();
+            upgrade_game(&game, asset, |release_state, received, total| {
+                progress_events.send(Event::ReleaseProgress {
+                    id: release_id.clone(),
+                    state: release_state,
+                    received,
+                    total,
+                });
+            })
+        });
+    finish_game_operation(id, game, result, events, state);
+}
+
+fn profile_command(
+    id: GameId,
+    profile: &TargetProfile,
+    events: &EventSink,
+    state: &mut WorkerState,
+) {
+    let Some(game) = begin_game_operation(&id, events, state) else {
+        return;
+    };
+    let progress_events = events.clone();
+    let cached: Vec<_> = state
+        .catalog
+        .releases
+        .iter()
+        .flat_map(|release| release.dlls.iter().cloned())
+        .collect();
+    let result = latest_asset(&state.assets)
+        .ok_or_else(|| WorkerError::State("official release metadata is not available".into()))
+        .and_then(|asset| {
+            let release_id = asset.release.id.clone();
+            apply_profile(
+                &game,
+                asset,
+                &cached,
+                profile,
+                |release_state, received, total| {
+                    progress_events.send(Event::ReleaseProgress {
+                        id: release_id.clone(),
+                        state: release_state,
+                        received,
+                        total,
+                    });
+                },
+            )
+        });
+    finish_game_operation(id, game, result, events, state);
+}
+
+fn undo_command(id: GameId, events: &EventSink, state: &mut WorkerState) {
+    let Some(game) = begin_game_operation(&id, events, state) else {
+        return;
+    };
+    let result = state
+        .undo_plans
+        .remove(&id)
+        .ok_or_else(|| WorkerError::State("the immediate undo plan is no longer available".into()))
+        .and_then(|plan| undo_game(&game, &plan));
+    finish_game_operation(id, game, result, events, state);
+}
+
+fn begin_game_operation(
+    id: &GameId,
+    events: &EventSink,
+    state: &WorkerState,
+) -> Option<GameInstall> {
+    events.send(Event::UpgradeStarted(id.clone()));
+    let game = state.games.iter().find(|game| game.id == *id).cloned();
+    if game.is_none() {
+        events.send(Event::UpgradeFinished {
+            game_id: id.clone(),
+            game: None,
+            result: Err(WorkerError::State(
+                "game is no longer present in the scan".into(),
+            )),
+        });
+    }
+    game
+}
+
+fn finish_game_operation(
+    id: GameId,
+    game: GameInstall,
+    result: WorkerResult<UpgradeReport>,
+    events: &EventSink,
+    state: &mut WorkerState,
+) {
+    if let Ok(report) = &result
+        && let Some(plan) = &report.undo_plan
+    {
+        state.undo_plans.insert(id.clone(), plan.clone());
+    }
+    let fresh = rescan_game(game);
+    if fresh.inspection_errors > 0 {
+        events.send(Event::Warning(format!(
+            "The operation finished, but {} DLL or traversal entries could not be inspected",
+            fresh.inspection_errors
+        )));
+    }
+    if let Some(existing) = state.games.iter_mut().find(|game| game.id == fresh.id) {
+        existing.clone_from(&fresh);
+    }
+    events.send(Event::UpgradeFinished {
+        game_id: id,
+        game: Some(fresh),
+        result,
+    });
+}
+
+fn add_root_command(root: &std::path::Path, events: &EventSink, state: &mut WorkerState) {
+    match root.canonicalize() {
+        Ok(root) if !state.roots.contains(&root) => state.roots.push(root),
+        Ok(_) => {}
+        Err(error) => events.send(Event::Warning(format!(
+            "Could not add game folder {}: {error}",
+            root.display()
+        ))),
+    }
+    scan(events, &state.roots, &mut state.games);
+}
+
+fn canonicalize_roots(roots: &mut Vec<PathBuf>) {
+    let mut normalized = Vec::with_capacity(roots.len());
+    for root in roots.drain(..) {
+        let root = root.canonicalize().unwrap_or(root);
+        if !normalized.contains(&root) {
+            normalized.push(root);
+        }
+    }
+    *roots = normalized;
+}
+
 fn scan(events: &EventSink, roots: &[PathBuf], games: &mut Vec<GameInstall>) {
     events.send(Event::ScanStarted);
-    let result = scan_roots(roots).map_err(|error| error.to_string());
-    if let Ok(discovered) = &result {
-        *games = discovered.clone();
+    let (discovered, warnings) = scan_roots(roots);
+    games.clone_from(&discovered);
+    for warning in warnings {
+        events.send(Event::Warning(warning));
     }
-    events.send(Event::ScanFinished(result));
+    events.send(Event::ScanFinished(Ok(discovered)));
 }
 
 fn refresh_catalog(
@@ -324,10 +413,19 @@ fn refresh_catalog(
     let refresh =
         GithubCatalogClient::new().and_then(|client| client.refresh(catalog.etag.as_deref()));
     let result = merge_catalog_refresh(assets, catalog, catalog_path, refresh);
-    if let Err(error) = &result {
-        tracing::warn!(%error, "catalog refresh failed");
+    match result {
+        Ok((snapshot, warning)) => {
+            if let Some(warning) = warning {
+                tracing::warn!(%warning, "using cached release catalog");
+                events.send(Event::Warning(warning));
+            }
+            events.send(Event::CatalogFinished(Ok(snapshot)));
+        }
+        Err(error) => {
+            tracing::warn!(%error, "catalog refresh failed");
+            events.send(Event::CatalogFinished(Err(error)));
+        }
     }
-    events.send(Event::CatalogFinished(result));
 }
 
 fn merge_catalog_refresh(
@@ -335,8 +433,9 @@ fn merge_catalog_refresh(
     catalog: &mut CatalogCacheIndex,
     catalog_path: Option<&std::path::Path>,
     refresh: Result<ReleaseRefresh, dlss_catalog::GithubError>,
-) -> Result<CatalogSnapshot, String> {
-    let refreshed = refresh.and_then(|refresh| {
+) -> WorkerResult<(CatalogSnapshot, Option<String>)> {
+    let refreshed: WorkerResult<CatalogSnapshot> = (|| {
+        let refresh = refresh?;
         match refresh {
             ReleaseRefresh::NotModified => {}
             ReleaseRefresh::Modified {
@@ -344,21 +443,24 @@ fn merge_catalog_refresh(
                 etag,
             } => {
                 catalog.etag = etag;
-                catalog.assets = updated.clone();
+                catalog.assets.clone_from(&updated);
                 *assets = updated;
             }
         }
         if let Some(path) = catalog_path {
-            catalog.save(path).map_err(|error| {
-                dlss_catalog::GithubError::Io(std::io::Error::other(error.to_string()))
-            })?;
+            catalog.save(path)?;
         }
         Ok(catalog_snapshot(assets, catalog))
-    });
+    })();
     match refreshed {
-        Ok(snapshot) => Ok(snapshot),
-        Err(_) if !assets.is_empty() => Ok(catalog_snapshot(assets, catalog)),
-        Err(error) => Err(error.to_string()),
+        Ok(snapshot) => Ok((snapshot, None)),
+        Err(error) if !assets.is_empty() => Ok((
+            catalog_snapshot(assets, catalog),
+            Some(format!(
+                "Catalog refresh failed; using saved metadata: {error}"
+            )),
+        )),
+        Err(error) => Err(error),
     }
 }
 
@@ -395,22 +497,36 @@ fn latest_asset(assets: &[OfficialAsset]) -> Option<&OfficialAsset> {
         .max_by_key(|asset| (asset.release.published_unix, &asset.release.tag))
 }
 
-fn scan_roots(roots: &[PathBuf]) -> Result<Vec<GameInstall>, dlss_core::CoreError> {
+fn scan_roots(roots: &[PathBuf]) -> (Vec<GameInstall>, Vec<String>) {
     #[cfg(windows)]
     let inspector: Box<dyn DllInspector> = Box::new(dlss_platform::windows::WindowsDllInspector);
     #[cfg(not(windows))]
     let inspector: Box<dyn DllInspector> = Box::new(dlss_platform::PortablePeInspector);
 
     #[cfg(windows)]
-    let mut games = dlss_platform::windows::WindowsGameLocator.discover()?;
+    let (mut games, mut warnings) = match dlss_platform::windows::WindowsGameLocator.discover() {
+        Ok(games) => (games, Vec::new()),
+        Err(error) => (
+            Vec::new(),
+            vec![format!("Automatic game discovery failed: {error}")],
+        ),
+    };
     #[cfg(not(windows))]
     let mut games: Vec<GameInstall> = Vec::new();
+    #[cfg(not(windows))]
+    let mut warnings = Vec::new();
     for root in roots {
         let mut game = match dlss_platform::manual_install(root) {
             Ok(game) => game,
-            Err(_) => continue,
+            Err(error) => {
+                warnings.push(format!("Could not scan {}: {error}", root.display()));
+                continue;
+            }
         };
         let inspected = dlss_platform::scan_game(&game.id, &game.root, inspector.as_ref());
+        for error in inspected.iter().filter_map(|result| result.as_ref().err()) {
+            warnings.push(format!("{}: {error}", game.name));
+        }
         game.inspection_errors = inspected.iter().filter(|result| result.is_err()).count();
         game.dlls = inspected.into_iter().filter_map(Result::ok).collect();
         if let Some(existing) = games.iter_mut().find(|existing| existing.id == game.id) {
@@ -420,7 +536,7 @@ fn scan_roots(roots: &[PathBuf]) -> Result<Vec<GameInstall>, dlss_core::CoreErro
         }
     }
     games.sort_by_key(|game| game.name.to_lowercase());
-    Ok(games)
+    (games, warnings)
 }
 
 #[cfg(windows)]
@@ -440,7 +556,7 @@ fn catalog_index_path() -> Option<PathBuf> {
 fn inspect_release(
     asset: &OfficialAsset,
     progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
-) -> Result<dlss_core::CachedRelease, String> {
+) -> WorkerResult<dlss_core::CachedRelease> {
     let (_, dlls) = prepare_release(asset, progress)?;
     Ok(dlss_core::CachedRelease {
         metadata: asset.release.clone(),
@@ -453,8 +569,10 @@ fn inspect_release(
 fn inspect_release(
     _asset: &OfficialAsset,
     _progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
-) -> Result<dlss_core::CachedRelease, String> {
-    Err("Authenticode release inspection is available only in Windows builds".into())
+) -> WorkerResult<dlss_core::CachedRelease> {
+    Err(WorkerError::Unavailable(
+        "Authenticode release inspection is available only in Windows builds",
+    ))
 }
 
 #[cfg(windows)]
@@ -462,10 +580,10 @@ fn upgrade_game(
     game: &GameInstall,
     asset: &OfficialAsset,
     progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
-) -> Result<UpgradeReport, String> {
+) -> WorkerResult<UpgradeReport> {
     let (base, catalog_dlls) = prepare_release(asset, progress)?;
     let plan = dlss_core::plan_strict_upgrades(operation_nonce(), &game.dlls, &catalog_dlls);
-    execute_game_plan(game, asset, base, plan)
+    Ok(execute_game_plan(game, asset, &base, &plan))
 }
 
 #[cfg(windows)]
@@ -475,11 +593,9 @@ fn apply_profile(
     cached: &[dlss_core::CatalogDll],
     profile: &TargetProfile,
     progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
-) -> Result<UpgradeReport, String> {
+) -> WorkerResult<UpgradeReport> {
     let (base, catalog_dlls) = prepare_release(asset, progress)?;
-    let backup_index = dlss_core::BackupStore::new(base.join("backups"))
-        .load_index()
-        .map_err(|error| error.to_string())?;
+    let backup_index = dlss_core::BackupStore::new(base.join("backups")).load_index()?;
     let plan = dlss_core::plan_target_profile(
         operation_nonce(),
         &game.dlls,
@@ -487,38 +603,38 @@ fn apply_profile(
         cached,
         &backup_index.records,
         profile,
-    )
-    .map_err(|error| error.to_string())?;
-    execute_game_plan(game, asset, base, plan)
+    )?;
+    Ok(execute_game_plan(game, asset, &base, &plan))
 }
 
 #[cfg(windows)]
 fn prepare_release(
     asset: &OfficialAsset,
     mut progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
-) -> Result<(PathBuf, Vec<dlss_core::CatalogDll>), String> {
+) -> WorkerResult<(PathBuf, Vec<dlss_core::CatalogDll>)> {
     let component = safe_component(&asset.release.id.0)?;
     let directories = dlss_platform::windows::WindowsKnownDirectories;
-    let base = directories
-        .local_app_data()
-        .map_err(|error| error.to_string())?
-        .join("DLSS Updater");
+    let base = directories.local_app_data()?.join("DLSS Updater");
     let archive = base.join("cache/archives").join(format!("{component}.zip"));
     let extracted = base.join("cache/releases").join(component);
     tracing::info!(release = %asset.release.tag, archive = %archive.display(), "preparing release");
-    let client = GithubCatalogClient::new().map_err(|error| error.to_string())?;
+    let client = GithubCatalogClient::new()?;
     let mut downloaded_fresh = false;
+    if archive.exists()
+        && let Err(error) = dlss_catalog::validate_cached_archive(asset, &archive)
+    {
+        tracing::warn!(release = %asset.release.tag, %error, "discarding invalid cached archive");
+        std::fs::remove_file(&archive)?;
+    }
     if !archive.exists() {
         progress(dlss_core::ReleaseState::Downloading, 0, Some(asset.size));
-        client
-            .download_with_progress(asset, &archive, |download| {
-                progress(
-                    dlss_core::ReleaseState::Downloading,
-                    download.received,
-                    download.total,
-                );
-            })
-            .map_err(|error| error.to_string())?;
+        client.download_with_progress(asset, &archive, |download| {
+            progress(
+                dlss_core::ReleaseState::Downloading,
+                download.received,
+                download.total,
+            );
+        })?;
         downloaded_fresh = true;
     }
     progress(
@@ -532,7 +648,7 @@ fn prepare_release(
         dlss_catalog::validate_and_extract(
             archive,
             &extracted,
-            asset.release.id.clone(),
+            &asset.release.id,
             &inspector,
             &verifier,
         )
@@ -556,19 +672,15 @@ fn prepare_release(
                         | dlss_catalog::CatalogError::InvalidPe(_)
                 ) =>
         {
-            std::fs::remove_file(&archive).map_err(|error| {
-                format!("could not discard the corrupt cached archive: {error}")
-            })?;
+            std::fs::remove_file(&archive)?;
             progress(dlss_core::ReleaseState::Downloading, 0, Some(asset.size));
-            client
-                .download_with_progress(asset, &archive, |download| {
-                    progress(
-                        dlss_core::ReleaseState::Downloading,
-                        download.received,
-                        download.total,
-                    );
-                })
-                .map_err(|error| error.to_string())?;
+            client.download_with_progress(asset, &archive, |download| {
+                progress(
+                    dlss_core::ReleaseState::Downloading,
+                    download.received,
+                    download.total,
+                );
+            })?;
             progress(
                 dlss_core::ReleaseState::Downloaded,
                 asset.size,
@@ -579,10 +691,10 @@ fn prepare_release(
                 asset.size,
                 Some(asset.size),
             );
-            let catalog_dlls = extract(&archive).map_err(|error| error.to_string())?;
+            let catalog_dlls = extract(&archive)?;
             Ok((base, catalog_dlls))
         }
-        Err(error) => Err(error.to_string()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -590,23 +702,23 @@ fn prepare_release(
 fn execute_game_plan(
     game: &GameInstall,
     asset: &OfficialAsset,
-    base: PathBuf,
-    plan: dlss_core::OperationPlan,
-) -> Result<UpgradeReport, String> {
+    base: &std::path::Path,
+    plan: &dlss_core::OperationPlan,
+) -> UpgradeReport {
     if plan.swaps.is_empty() {
-        return Ok(UpgradeReport {
+        return UpgradeReport {
             changed: 0,
             failed: 0,
             release: asset.release.tag.clone(),
             can_undo: false,
             warning: None,
             undo_plan: None,
-        });
+        };
     }
     let inspector = dlss_platform::windows::WindowsDllInspector;
     let backups = dlss_core::BackupStore::new(base.join("backups"));
     let mut result = dlss_core::execute_plan(
-        &plan,
+        plan,
         &inspector,
         &dlss_platform::windows::WindowsAtomicFileReplacer,
         &backups,
@@ -621,7 +733,7 @@ fn execute_game_plan(
         .collect();
     let mut warning = None;
     if !denied.is_empty() {
-        match elevate_failed(game, &base, denied) {
+        match elevate_failed(game, base, denied) {
             Ok(elevated) => {
                 for elevated_swap in elevated.swaps {
                     if let Some(existing) = result
@@ -633,7 +745,7 @@ fn execute_game_plan(
                     }
                 }
             }
-            Err(error) => warning = Some(error),
+            Err(error) => warning = Some(error.to_string()),
         }
     }
     let changed = result
@@ -664,7 +776,7 @@ fn execute_game_plan(
         })
         .collect::<Vec<_>>();
     let can_undo = !undo_swaps.is_empty();
-    Ok(UpgradeReport {
+    UpgradeReport {
         changed,
         failed: result.swaps.len() - changed,
         release: asset.release.tag.clone(),
@@ -674,7 +786,7 @@ fn execute_game_plan(
             nonce: operation_nonce(),
             swaps: undo_swaps,
         }),
-    })
+    }
 }
 
 #[cfg(windows)]
@@ -682,12 +794,12 @@ fn elevate_failed(
     game: &GameInstall,
     base: &std::path::Path,
     swaps: Vec<dlss_core::PlannedSwap>,
-) -> Result<dlss_core::BatchResult, String> {
+) -> WorkerResult<dlss_core::BatchResult> {
     let nonce = operation_nonce();
     let plans = base.join("helper-plans");
     let results = base.join("helper-results");
-    std::fs::create_dir_all(&plans).map_err(|error| error.to_string())?;
-    std::fs::create_dir_all(&results).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&plans)?;
+    std::fs::create_dir_all(&results)?;
     let result_path = results.join(format!("{nonce}.json"));
     let plan_path = plans.join(format!("{nonce}.json"));
     let plan = dlss_core::ElevatedHelperPlan::FileSwap(dlss_core::ElevatedFilePlan {
@@ -700,37 +812,45 @@ fn elevate_failed(
         nonce,
         result_path: result_path.clone(),
     });
-    dlss_core::write_versioned_json(&plan_path, 1, &plan).map_err(|error| error.to_string())?;
-    dlss_platform::windows::WindowsPrivilegeBroker
-        .run_elevated(&plan_path)
-        .map_err(elevation_error)?;
-    let outcome: Result<dlss_core::BatchResult, String> =
-        dlss_core::read_versioned_json(&result_path, 1)
-            .map_err(|error| format!("the elevated helper did not report a result: {error}"))?;
-    outcome.map_err(|message| format!("the elevated helper rejected the plan: {message}"))
+    let outcome = (|| {
+        dlss_core::write_versioned_json(&plan_path, 1, &plan)?;
+        dlss_platform::windows::WindowsPrivilegeBroker
+            .run_elevated(&plan_path)
+            .map_err(elevation_error)?;
+        let outcome: Result<dlss_core::BatchResult, String> =
+            dlss_core::read_versioned_json(&result_path, 1).map_err(|error| {
+                WorkerError::Elevation(format!(
+                    "the elevated helper did not report a result: {error}"
+                ))
+            })?;
+        outcome.map_err(|message| {
+            WorkerError::Elevation(format!("the elevated helper rejected the plan: {message}"))
+        })
+    })();
+    cleanup_helper_files(&plan_path, &result_path);
+    outcome
 }
 
 /// Maps a UAC prompt cancellation to a friendly message and keeps other errors verbatim.
 #[cfg(windows)]
-fn elevation_error(error: dlss_core::CoreError) -> String {
+fn elevation_error(error: dlss_core::CoreError) -> WorkerError {
     match error {
-        dlss_core::CoreError::Cancelled => "elevation was cancelled".into(),
-        other => other.to_string(),
+        dlss_core::CoreError::Cancelled => WorkerError::Elevation("elevation was cancelled".into()),
+        other => WorkerError::Elevation(other.to_string()),
     }
 }
 
 /// Runs the elevated DLSS-indicator change off the UI thread. The caller has
 /// already resolved the stale-hash confirmation and target state.
 #[cfg(windows)]
-fn change_indicator(request: IndicatorRequest) -> Result<dlss_core::ToolChangeResult, String> {
+fn change_indicator(request: IndicatorRequest) -> WorkerResult<dlss_core::ToolChangeResult> {
     let base = dlss_platform::windows::WindowsKnownDirectories
-        .local_app_data()
-        .map_err(|error| error.to_string())?
+        .local_app_data()?
         .join("DLSS Updater");
     let plans = base.join("helper-plans");
     let results = base.join("helper-results");
-    std::fs::create_dir_all(&plans).map_err(|error| error.to_string())?;
-    std::fs::create_dir_all(&results).map_err(|error| error.to_string())?;
+    std::fs::create_dir_all(&plans)?;
+    std::fs::create_dir_all(&results)?;
     let nonce = operation_nonce();
     let result_path = results.join(format!("{nonce}.json"));
     let plan_path = plans.join(format!("{nonce}.json"));
@@ -743,34 +863,36 @@ fn change_indicator(request: IndicatorRequest) -> Result<dlss_core::ToolChangeRe
         result_path: result_path.clone(),
         allow_stale_restore: request.allow_stale_restore,
     };
-    dlss_core::write_versioned_json(
-        &plan_path,
-        1,
-        &dlss_core::ElevatedHelperPlan::SystemTool(plan),
-    )
-    .map_err(|error| error.to_string())?;
-    dlss_platform::windows::WindowsPrivilegeBroker
-        .run_elevated(&plan_path)
-        .map_err(elevation_error)?;
-    let outcome: Result<dlss_core::ToolChangeResult, String> =
-        dlss_core::read_versioned_json(&result_path, 1)
-            .map_err(|error| format!("the elevated helper did not report a result: {error}"))?;
-    outcome.map_err(|message| format!("the elevated helper rejected the plan: {message}"))
-}
-
-#[cfg(not(windows))]
-fn change_indicator(_request: IndicatorRequest) -> Result<dlss_core::ToolChangeResult, String> {
-    Err("Registry controls are available only in Windows builds".into())
+    let outcome = (|| {
+        dlss_core::write_versioned_json(
+            &plan_path,
+            1,
+            &dlss_core::ElevatedHelperPlan::SystemTool(plan),
+        )?;
+        dlss_platform::windows::WindowsPrivilegeBroker
+            .run_elevated(&plan_path)
+            .map_err(elevation_error)?;
+        let outcome: Result<dlss_core::ToolChangeResult, String> =
+            dlss_core::read_versioned_json(&result_path, 1).map_err(|error| {
+                WorkerError::Elevation(format!(
+                    "the elevated helper did not report a result: {error}"
+                ))
+            })?;
+        outcome.map_err(|message| {
+            WorkerError::Elevation(format!("the elevated helper rejected the plan: {message}"))
+        })
+    })();
+    cleanup_helper_files(&plan_path, &result_path);
+    outcome
 }
 
 #[cfg(windows)]
-fn undo_game(_game: &GameInstall, plan: dlss_core::OperationPlan) -> Result<UpgradeReport, String> {
+fn undo_game(_game: &GameInstall, plan: &dlss_core::OperationPlan) -> WorkerResult<UpgradeReport> {
     let base = dlss_platform::windows::WindowsKnownDirectories
-        .local_app_data()
-        .map_err(|error| error.to_string())?
+        .local_app_data()?
         .join("DLSS Updater");
     let result = dlss_core::execute_plan(
-        &plan,
+        plan,
         &dlss_platform::windows::WindowsDllInspector,
         &dlss_platform::windows::WindowsAtomicFileReplacer,
         &dlss_core::BackupStore::new(base.join("backups")),
@@ -796,8 +918,10 @@ fn upgrade_game(
     _game: &GameInstall,
     _asset: &OfficialAsset,
     _progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
-) -> Result<UpgradeReport, String> {
-    Err("DLL replacement is available only in Windows builds".into())
+) -> WorkerResult<UpgradeReport> {
+    Err(WorkerError::Unavailable(
+        "DLL replacement is available only in Windows builds",
+    ))
 }
 
 #[cfg(not(windows))]
@@ -807,19 +931,20 @@ fn apply_profile(
     _cached: &[dlss_core::CatalogDll],
     _profile: &TargetProfile,
     _progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
-) -> Result<UpgradeReport, String> {
-    Err("DLL replacement is available only in Windows builds".into())
+) -> WorkerResult<UpgradeReport> {
+    Err(WorkerError::Unavailable(
+        "DLL replacement is available only in Windows builds",
+    ))
 }
 
 #[cfg(not(windows))]
-fn undo_game(
-    _game: &GameInstall,
-    _plan: dlss_core::OperationPlan,
-) -> Result<UpgradeReport, String> {
-    Err("DLL replacement is available only in Windows builds".into())
+fn undo_game(_game: &GameInstall, _plan: &dlss_core::OperationPlan) -> WorkerResult<UpgradeReport> {
+    Err(WorkerError::Unavailable(
+        "DLL replacement is available only in Windows builds",
+    ))
 }
 
-fn rescan_game(mut game: GameInstall) -> Result<GameInstall, dlss_core::CoreError> {
+fn rescan_game(mut game: GameInstall) -> GameInstall {
     #[cfg(windows)]
     let inspector: Box<dyn DllInspector> = Box::new(dlss_platform::windows::WindowsDllInspector);
     #[cfg(not(windows))]
@@ -829,18 +954,18 @@ fn rescan_game(mut game: GameInstall) -> Result<GameInstall, dlss_core::CoreErro
     let inspected = dlss_platform::scan_game(&game.id, &game.root, inspector.as_ref());
     game.inspection_errors = inspected.iter().filter(|result| result.is_err()).count();
     game.dlls = inspected.into_iter().filter_map(Result::ok).collect();
-    Ok(game)
+    game
 }
 
 #[cfg(windows)]
-fn safe_component(value: &str) -> Result<&str, String> {
+fn safe_component(value: &str) -> WorkerResult<&str> {
     (!value.is_empty()
         && value.len() <= 128
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')))
     .then_some(value)
-    .ok_or_else(|| "release tag is not a safe cache component".into())
+    .ok_or_else(|| WorkerError::State("release tag is not a safe cache component".into()))
 }
 
 #[cfg(windows)]
@@ -854,6 +979,17 @@ fn now_nanos() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default()
+}
+
+#[cfg(windows)]
+fn cleanup_helper_files(plan: &std::path::Path, result: &std::path::Path) {
+    for path in [plan, result] {
+        if let Err(error) = std::fs::remove_file(path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %path.display(), %error, "could not clean helper staging file");
+        }
+    }
 }
 
 impl Drop for Worker {
@@ -913,10 +1049,23 @@ mod tests {
                 "offline",
             )))
         };
-        let snapshot = merge_catalog_refresh(&mut assets, &mut catalog, None, offline()).unwrap();
+        let (snapshot, warning) =
+            merge_catalog_refresh(&mut assets, &mut catalog, None, offline()).unwrap();
         assert_eq!(snapshot.latest.as_deref(), Some("v1"));
+        assert!(warning.is_some());
 
         assets.clear();
         assert!(merge_catalog_refresh(&mut assets, &mut catalog, None, offline()).is_err());
+    }
+
+    #[test]
+    fn custom_roots_are_canonicalized_and_deduplicated() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("game");
+        std::fs::create_dir(&child).unwrap();
+        let alias = child.join("..").join("game");
+        let mut roots = vec![child.clone(), alias];
+        canonicalize_roots(&mut roots);
+        assert_eq!(roots, vec![child.canonicalize().unwrap()]);
     }
 }

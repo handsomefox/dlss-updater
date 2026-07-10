@@ -27,3 +27,10 @@ zip = { version = "5", default-features = false, features = ["deflate"] }
 [profile.release]
 lto = "thin"
 strip = true
+
+[workspace.lints.rust]
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }

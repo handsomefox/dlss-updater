@@ -9,8 +9,11 @@ use std::{
     collections::HashSet,
     fs::{self, File},
     io::{self, Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
+    sync::atomic::{AtomicU64, Ordering},
 };
+
+static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
 
 pub const CATALOG_SCHEMA_VERSION: u32 = 1;
 
@@ -22,6 +25,10 @@ pub struct CatalogCacheIndex {
 }
 
 impl CatalogCacheIndex {
+    /// Loads the cache index or returns an empty index when it does not exist.
+    ///
+    /// # Errors
+    /// Returns an error when the persisted envelope is unreadable or invalid.
     pub fn load(path: &Path) -> Result<Self, dlss_core::CoreError> {
         if !path.exists() {
             return Ok(Self::default());
@@ -29,6 +36,10 @@ impl CatalogCacheIndex {
         dlss_core::read_versioned_json(path, CATALOG_SCHEMA_VERSION)
     }
 
+    /// Atomically persists the cache index.
+    ///
+    /// # Errors
+    /// Returns an error when serialization or persistence fails.
     pub fn save(&self, path: &Path) -> Result<(), dlss_core::CoreError> {
         dlss_core::write_versioned_json(path, CATALOG_SCHEMA_VERSION, self)
     }
@@ -75,10 +86,71 @@ pub enum CatalogError {
 }
 
 /// Extracts only immediate production DLLs in `bin/x64`, never development DLLs.
+///
+/// # Errors
+/// Returns an error when the archive or any candidate violates path, size, PE,
+/// signature, duplication, or persistence constraints.
 pub fn validate_and_extract(
     archive: &Path,
     destination: &Path,
-    release: ReleaseId,
+    release: &ReleaseId,
+    inspector: &dyn DllInspector,
+    trust: &dyn TrustVerifier,
+) -> Result<Vec<CatalogDll>, CatalogError> {
+    let parent = destination.parent().ok_or_else(|| {
+        CatalogError::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "release destination has no parent",
+        ))
+    })?;
+    fs::create_dir_all(parent)?;
+    let nonce = STAGING_NONCE.fetch_add(1, Ordering::Relaxed);
+    let leaf = destination
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("release");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let unique = format!("{}-{timestamp:032x}-{nonce:016x}", std::process::id());
+    let staging = parent.join(format!(".{leaf}.staging-{unique}"));
+    let previous = parent.join(format!(".{leaf}.previous-{unique}"));
+    let result = extract_to_staging(archive, &staging, release, inspector, trust);
+    let mut extracted = match result {
+        Ok(extracted) => extracted,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+    let had_previous = destination.exists();
+    if had_previous && let Err(error) = fs::rename(destination, &previous) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error.into());
+    }
+    if let Err(error) = fs::rename(&staging, destination) {
+        if had_previous {
+            let _ = fs::rename(&previous, destination);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error.into());
+    }
+    if had_previous && let Err(error) = fs::remove_dir_all(&previous) {
+        let _ = fs::rename(destination, &staging);
+        let _ = fs::rename(&previous, destination);
+        let _ = fs::remove_dir_all(&staging);
+        return Err(error.into());
+    }
+    for dll in &mut extracted {
+        dll.source = destination.join(&dll.file_name);
+    }
+    Ok(extracted)
+}
+
+fn extract_to_staging(
+    archive: &Path,
+    destination: &Path,
+    release: &ReleaseId,
     inspector: &dyn DllInspector,
     trust: &dyn TrustVerifier,
 ) -> Result<Vec<CatalogDll>, CatalogError> {
@@ -121,7 +193,7 @@ pub fn validate_and_extract(
         let temporary = output.with_extension("dll.partial");
         let mut file = File::create(&temporary)?;
         let mut hasher = Sha256::new();
-        let mut buffer = [0u8; 64 * 1024];
+        let mut buffer = vec![0_u8; 64 * 1024];
         let mut written = 0_u64;
         loop {
             let count = entry.read(&mut buffer)?;
@@ -175,15 +247,11 @@ pub fn validate_and_extract(
     Ok(extracted)
 }
 
-pub fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
+pub(crate) fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
     io::copy(&mut file, &mut hash)?;
     Ok(hash.finalize().into())
-}
-
-pub fn cache_release_dir(cache: &Path, release: &ReleaseId) -> PathBuf {
-    cache.join("releases").join(&release.0)
 }
 
 #[cfg(test)]
@@ -191,6 +259,7 @@ mod tests {
     use super::*;
     use dlss_core::{CoreError, DllMetadata, DllVersion};
     use std::io::Write;
+    use std::path::PathBuf;
     use tempfile::tempdir;
     use zip::write::SimpleFileOptions;
 
@@ -199,7 +268,12 @@ mod tests {
         fn inspect(&self, path: &Path) -> Result<DllMetadata, CoreError> {
             let bytes = fs::read(path)?;
             Ok(DllMetadata {
-                version: Some(DllVersion::new(2, 12, 0, bytes.len() as u16)),
+                version: Some(DllVersion::new(
+                    2,
+                    12,
+                    0,
+                    u16::try_from(bytes.len()).unwrap(),
+                )),
                 sha256: Sha256::digest(&bytes).into(),
                 signature: SignatureStatus::Trusted,
                 x86_64: !bytes.starts_with(b"x86"),
@@ -245,7 +319,7 @@ mod tests {
         let dlls = validate_and_extract(
             &path,
             &output,
-            ReleaseId("v2.12.0".into()),
+            &ReleaseId("v2.12.0".into()),
             &Inspector,
             &Trust(true),
         )
@@ -261,7 +335,7 @@ mod tests {
         let result = validate_and_extract(
             &path,
             &directory.path().join("output"),
-            ReleaseId("r".into()),
+            &ReleaseId("r".into()),
             &Inspector,
             &Trust(true),
         );
@@ -277,7 +351,7 @@ mod tests {
         let result = validate_and_extract(
             &path,
             &directory.path().join("output"),
-            ReleaseId("r".into()),
+            &ReleaseId("r".into()),
             &Inspector,
             &Trust(true),
         );
@@ -291,7 +365,7 @@ mod tests {
         let result = validate_and_extract(
             &path,
             &directory.path().join("output"),
-            ReleaseId("r".into()),
+            &ReleaseId("r".into()),
             &Inspector,
             &Trust(true),
         );
@@ -304,7 +378,7 @@ mod tests {
         let untrusted = validate_and_extract(
             &path,
             &directory.path().join("untrusted"),
-            ReleaseId("r".into()),
+            &ReleaseId("r".into()),
             &Inspector,
             &Trust(false),
         );
@@ -314,11 +388,63 @@ mod tests {
         let wrong_arch = validate_and_extract(
             &path,
             &directory.path().join("wrong-arch"),
-            ReleaseId("r".into()),
+            &ReleaseId("r".into()),
             &Inspector,
             &Trust(true),
         );
         assert!(matches!(wrong_arch, Err(CatalogError::InvalidPe(_))));
+    }
+
+    #[test]
+    fn failed_validation_preserves_ready_cache_and_cleans_staging() {
+        let (directory, path) = archive(&[
+            ("bin/x64/sl.common.dll", b"valid"),
+            ("bin/x64/sl.bad.dll", b"x86-binary"),
+        ]);
+        let output = directory.path().join("release");
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("ready.dll"), b"previous").unwrap();
+
+        let result = validate_and_extract(
+            &path,
+            &output,
+            &ReleaseId("r".into()),
+            &Inspector,
+            &Trust(true),
+        );
+
+        assert!(matches!(result, Err(CatalogError::InvalidPe(_))));
+        assert_eq!(fs::read(output.join("ready.dll")).unwrap(), b"previous");
+        let siblings: Vec<_> = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(
+            siblings
+                .iter()
+                .all(|name| !name.to_string_lossy().contains("staging"))
+        );
+    }
+
+    #[test]
+    fn successful_validation_commits_complete_release_at_once() {
+        let (directory, path) = archive(&[("bin/x64/sl.common.dll", b"valid")]);
+        let output = directory.path().join("release");
+        fs::create_dir(&output).unwrap();
+        fs::write(output.join("stale.dll"), b"previous").unwrap();
+
+        let dlls = validate_and_extract(
+            &path,
+            &output,
+            &ReleaseId("r".into()),
+            &Inspector,
+            &Trust(true),
+        )
+        .unwrap();
+
+        assert!(!output.join("stale.dll").exists());
+        assert_eq!(dlls[0].source, output.join("sl.common.dll"));
+        assert!(dlls[0].source.exists());
     }
 
     #[test]

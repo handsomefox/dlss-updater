@@ -15,6 +15,7 @@ use std::{
 
 /// Build the direct one-click plan. Unknown, equal-version/different-build, newer,
 /// identical, missing, and differently named DLLs are deliberately preserved.
+#[must_use]
 pub fn plan_strict_upgrades(
     nonce: impl Into<String>,
     installed: &[DllInstallation],
@@ -50,6 +51,10 @@ pub fn plan_strict_upgrades(
 /// Resolves an advanced per-installation profile into immutable file swaps.
 /// Unlike the one-click planner, this deliberately permits downgrades,
 /// different builds with the same numeric version, and restore points.
+///
+/// # Errors
+/// Returns an error when the profile references an unknown installation or an
+/// unavailable source.
 pub fn plan_target_profile(
     nonce: impl Into<String>,
     installed: &[DllInstallation],
@@ -135,6 +140,7 @@ pub fn plan_target_profile(
     })
 }
 
+#[must_use]
 pub fn same_file_name(left: &OsStr, right: &OsStr) -> bool {
     matches!((fold_file_name(left), fold_file_name(right)), (Some(left), Some(right)) if left == right)
 }
@@ -155,10 +161,15 @@ pub struct BackupStore {
 }
 
 impl BackupStore {
+    #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
+    /// Commits an immutable, content-addressed backup and updates its index.
+    ///
+    /// # Errors
+    /// Returns an error when inspection, hashing, copying, or persistence fails.
     pub fn commit(
         &self,
         original: &Path,
@@ -209,6 +220,10 @@ impl BackupStore {
         Ok(record)
     }
 
+    /// Loads the backup index, returning an empty index when none exists.
+    ///
+    /// # Errors
+    /// Returns an error when the index cannot be read or validated.
     pub fn load_index(&self) -> Result<BackupIndex, CoreError> {
         let path = self.root.join("index.json");
         if path.exists() {
@@ -280,10 +295,14 @@ fn execute_swap(
     Ok((installed, backup))
 }
 
+/// Computes a file's SHA-256 digest.
+///
+/// # Errors
+/// Returns an error when the file cannot be read.
 pub fn hash_file(path: &Path) -> Result<[u8; 32], CoreError> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = file.read(&mut buffer)?;
         if read == 0 {
@@ -301,7 +320,7 @@ fn copy_flush_hash(source: &Path, destination: &Path, expected: [u8; 32]) -> Res
         .create_new(true)
         .open(destination)?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = input.read(&mut buffer)?;
         if read == 0 {
@@ -319,6 +338,10 @@ fn copy_flush_hash(source: &Path, destination: &Path, expected: [u8; 32]) -> Res
     Ok(())
 }
 
+/// Atomically writes a payload in a versioned JSON envelope.
+///
+/// # Errors
+/// Returns an error when serialization or durable persistence fails.
 pub fn write_versioned_json<T: Serialize>(
     destination: &Path,
     schema_version: u32,
@@ -344,6 +367,10 @@ pub fn write_versioned_json<T: Serialize>(
     Ok(())
 }
 
+/// Reads and validates a payload from a versioned JSON envelope.
+///
+/// # Errors
+/// Returns an error when reading, decoding, or schema validation fails.
 pub fn read_versioned_json<T: DeserializeOwned>(
     source: &Path,
     expected_schema: u32,
@@ -365,7 +392,12 @@ pub fn read_versioned_json<T: DeserializeOwned>(
 }
 
 fn hex_hash(hash: [u8; 32]) -> String {
-    hash.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(64);
+    for byte in hash {
+        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -484,7 +516,7 @@ mod tests {
         ];
         let sources = ["latest.bin", "cached.bin", "backup.bin"].map(|name| dir.path().join(name));
         for (index, source) in sources.iter().enumerate() {
-            fs::write(source, [index as u8 + 20]).unwrap();
+            fs::write(source, [u8::try_from(index).unwrap() + 20]).unwrap();
         }
         let latest = CatalogDll {
             file_name: "upgrade.dll".into(),

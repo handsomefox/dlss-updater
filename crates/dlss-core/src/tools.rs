@@ -71,6 +71,7 @@ pub struct ToolChangeResult {
     pub restore_point: Option<ToolRestorePoint>,
 }
 
+#[must_use]
 pub fn indicator_state(value: Option<(u32, &[u8])>) -> SystemToolState {
     let Some((ty, raw)) = value else {
         return SystemToolState::NotConfigured;
@@ -81,7 +82,9 @@ pub fn indicator_state(value: Option<(u32, &[u8])>) -> SystemToolState {
             raw: raw.to_vec(),
         };
     }
-    match u32::from_le_bytes(raw.try_into().expect("length checked")) {
+    let mut bytes = [0_u8; 4];
+    bytes.copy_from_slice(raw);
+    match u32::from_le_bytes(bytes) {
         0 => SystemToolState::Off,
         1 => SystemToolState::DlssIndicatorDebug,
         1024 => SystemToolState::DlssIndicatorProduction,

@@ -9,7 +9,7 @@ use tracing_subscriber::{EnvFilter, fmt::MakeWriter};
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_LOG_DAYS: usize = 7;
 
-pub fn init() {
+pub(crate) fn init() {
     let Some(directory) = log_directory() else {
         return;
     };
@@ -49,6 +49,7 @@ fn today() -> String {
     jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
 }
 
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
 fn prune_old_logs(directory: &std::path::Path) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
@@ -122,13 +123,13 @@ impl Write for LogWriter {
         if state.bytes >= MAX_LOG_BYTES {
             return Ok(buffer.len());
         }
-        let remaining = (MAX_LOG_BYTES - state.bytes) as usize;
+        let remaining = usize::try_from(MAX_LOG_BYTES - state.bytes).unwrap_or(usize::MAX);
         let written = state
             .file
             .as_mut()
             .ok_or_else(|| io::Error::other("log file unavailable"))?
             .write(&buffer[..buffer.len().min(remaining)])?;
-        state.bytes += written as u64;
+        state.bytes += u64::try_from(written).unwrap_or(u64::MAX);
         Ok(buffer.len())
     }
 

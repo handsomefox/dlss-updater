@@ -23,7 +23,8 @@ fn main() -> eframe::Result {
     diagnostics::init();
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "starting DLSS Updater");
     if std::env::args_os().any(|arg| arg == "--elevated-helper") {
-        return elevated_helper();
+        elevated_helper();
+        return Ok(());
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -38,7 +39,7 @@ fn main() -> eframe::Result {
     )
 }
 
-fn elevated_helper() -> eframe::Result {
+fn elevated_helper() {
     #[cfg(windows)]
     {
         let mut arguments = std::env::args_os().skip_while(|arg| arg != "--elevated-helper");
@@ -58,7 +59,6 @@ fn elevated_helper() -> eframe::Result {
     }
     #[cfg(not(windows))]
     tracing::warn!("elevated helper is unavailable on this platform");
-    Ok(())
 }
 
 struct DlssApp {
@@ -70,21 +70,17 @@ struct DlssApp {
     store_filter: StoreFilter,
     selected: Option<usize>,
     selected_dlls: std::collections::HashSet<dlss_core::DllInstallationId>,
-    show_tools: bool,
+    open_windows: std::collections::HashSet<AppWindow>,
     tool_state: SystemToolState,
     staged_tool_state: SystemToolState,
     capabilities: PlatformCapabilities,
     worker: Worker,
-    scanning: bool,
+    runtime: RuntimeStatus,
     last_error: Option<String>,
     catalog_release: Option<String>,
-    catalog_loading: bool,
     catalog_error: Option<String>,
     releases: Vec<dlss_core::CachedRelease>,
     backups: Vec<dlss_core::BackupRecord>,
-    show_releases: bool,
-    show_activity: bool,
-    show_roots: bool,
     inspecting_release: Option<dlss_core::ReleaseId>,
     upgrading: Option<dlss_core::GameId>,
     toast: Option<String>,
@@ -94,9 +90,28 @@ struct DlssApp {
     review: Option<ReviewKind>,
     profiles_applying: std::collections::HashSet<dlss_core::GameId>,
     #[cfg(windows)]
-    tool_observed_hash: Option<[u8; 32]>,
-    #[cfg(windows)]
-    tool_stale_confirmed: bool,
+    tool_runtime: WindowsToolRuntime,
+}
+
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum AppWindow {
+    Tools,
+    Releases,
+    Activity,
+    Roots,
+}
+
+struct RuntimeStatus {
+    scanning: bool,
+    catalog_loading: bool,
+    worker_connected: bool,
+}
+
+#[cfg(windows)]
+#[derive(Default)]
+struct WindowsToolRuntime {
+    observed_hash: Option<[u8; 32]>,
+    stale_confirmed: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -193,23 +208,28 @@ impl DlssApp {
             let excess = persisted.activity.len() - 500;
             persisted.activity.drain(..excess);
         }
+        canonicalize_roots(&mut persisted.custom_roots);
         #[cfg(windows)]
         let capabilities = dlss_platform::windows::capabilities();
         #[cfg(not(windows))]
         let capabilities = PlatformCapabilities::default();
         #[cfg(windows)]
-        let backups = dlss_platform::windows::WindowsKnownDirectories
+        let backup_result = dlss_platform::windows::WindowsKnownDirectories
             .local_app_data()
-            .ok()
             .and_then(|base| {
-                dlss_core::BackupStore::new(base.join("DLSS Updater/backups"))
-                    .load_index()
-                    .ok()
+                dlss_core::BackupStore::new(base.join("DLSS Updater/backups")).load_index()
             })
-            .map(|index| index.records)
-            .unwrap_or_default();
+            .map(|index| index.records);
+        #[cfg(windows)]
+        let (backups, backup_warning) = match backup_result {
+            Ok(backups) => (backups, None),
+            Err(error) => (
+                Vec::new(),
+                Some(format!("Could not load backup history: {error}")),
+            ),
+        };
         #[cfg(not(windows))]
-        let backups = Vec::new();
+        let (backups, backup_warning) = (Vec::new(), None);
         let worker = Worker::start(persisted.custom_roots.clone(), cc.egui_ctx.clone());
         let app = Self {
             persisted,
@@ -220,23 +240,23 @@ impl DlssApp {
             store_filter: StoreFilter::All,
             selected: None,
             selected_dlls: std::collections::HashSet::new(),
-            show_tools: false,
+            open_windows: std::collections::HashSet::new(),
             tool_state: SystemToolState::Unavailable(
                 "Windows registry controls are unavailable on this platform".into(),
             ),
             staged_tool_state: SystemToolState::Off,
             capabilities,
             worker,
-            scanning: false,
-            last_error: None,
+            runtime: RuntimeStatus {
+                scanning: false,
+                catalog_loading: true,
+                worker_connected: true,
+            },
+            last_error: backup_warning,
             catalog_release: None,
-            catalog_loading: true,
             catalog_error: None,
             releases: Vec::new(),
             backups,
-            show_releases: false,
-            show_activity: false,
-            show_roots: false,
             inspecting_release: None,
             upgrading: None,
             toast: None,
@@ -246,9 +266,7 @@ impl DlssApp {
             review: None,
             profiles_applying: std::collections::HashSet::new(),
             #[cfg(windows)]
-            tool_observed_hash: None,
-            #[cfg(windows)]
-            tool_stale_confirmed: false,
+            tool_runtime: WindowsToolRuntime::default(),
         };
         let _ = app.worker.commands.send(Command::Scan);
         let _ = app.worker.commands.send(Command::RefreshCatalog);
@@ -256,47 +274,70 @@ impl DlssApp {
     }
 
     fn game_table(&mut self, ui: &mut egui::Ui) {
-        let mut requested_upgrade = None;
-        let mut requested_sort = None;
+        let rows = self.filtered_game_rows();
+        let (requested_sort, requested_upgrade) = self.render_game_rows(ui, &rows);
+        if let Some(sort) = requested_sort {
+            self.game_sort = sort;
+        }
+        if let Some(game_id) = requested_upgrade {
+            self.upgrading = Some(game_id.clone());
+            self.toast = Some("Preparing official release…".into());
+            let _ = self.worker.commands.send(Command::UpgradeLatest(game_id));
+        }
+        self.render_game_empty_state(ui, rows.is_empty());
+    }
+
+    fn filtered_game_rows(&self) -> Vec<usize> {
         let filter = self.filter.to_ascii_lowercase();
         let mut rows: Vec<usize> = self
             .games
             .iter()
             .enumerate()
-            .filter(|(_, g)| {
-                let text_matches = filter.is_empty()
-                    || g.name.to_ascii_lowercase().contains(&filter)
-                    || g.store.to_ascii_lowercase().contains(&filter);
-                let store_matches = match self.store_filter {
-                    StoreFilter::All => true,
-                    StoreFilter::Steam => g.store == "Steam",
-                    StoreFilter::Epic => g.store == "Epic",
-                    StoreFilter::Gog => g.store == "GOG",
-                    StoreFilter::Manual => g.store == "Manual",
-                };
-                let ids: std::collections::HashSet<_> =
-                    g.details.iter().map(|dll| &dll.id).collect();
-                let custom = self
-                    .persisted
-                    .target_profile
-                    .targets
-                    .iter()
-                    .any(|(id, target)| {
-                        ids.contains(id) && *target != dlss_core::DesiredDll::KeepInstalled
-                    });
-                let mode_matches = match self.filter_mode {
-                    GameFilter::All => true,
-                    GameFilter::HasDlls => g.dlls > 0,
-                    GameFilter::Upgrades => g.upgrades > 0,
-                    GameFilter::Custom => custom,
-                    GameFilter::Errors => g.inspection_errors > 0 || g.state == "Unknown",
-                    GameFilter::Recent => g.last_operation != "Never",
-                };
-                text_matches && store_matches && mode_matches
-            })
-            .map(|(i, _)| i)
+            .filter(|(_, game)| self.game_matches_filters(game, &filter))
+            .map(|(index, _)| index)
             .collect();
         ui::table::sort_rows(&mut rows, &self.games, self.game_sort);
+        rows
+    }
+
+    fn game_matches_filters(&self, game: &GameRow, filter: &str) -> bool {
+        let text_matches = filter.is_empty()
+            || game.name.to_ascii_lowercase().contains(filter)
+            || game.store.to_ascii_lowercase().contains(filter);
+        let store_matches = match self.store_filter {
+            StoreFilter::All => true,
+            StoreFilter::Steam => game.store == "Steam",
+            StoreFilter::Epic => game.store == "Epic",
+            StoreFilter::Gog => game.store == "GOG",
+            StoreFilter::Manual => game.store == "Manual",
+        };
+        let ids: std::collections::HashSet<_> = game.details.iter().map(|dll| &dll.id).collect();
+        let custom = self
+            .persisted
+            .target_profile
+            .targets
+            .iter()
+            .any(|(id, target)| {
+                ids.contains(id) && *target != dlss_core::DesiredDll::KeepInstalled
+            });
+        let mode_matches = match self.filter_mode {
+            GameFilter::All => true,
+            GameFilter::HasDlls => game.dlls > 0,
+            GameFilter::Upgrades => game.upgrades > 0,
+            GameFilter::Custom => custom,
+            GameFilter::Errors => game.inspection_errors > 0 || game.state == "Unknown",
+            GameFilter::Recent => game.last_operation != "Never",
+        };
+        text_matches && store_matches && mode_matches
+    }
+
+    fn render_game_rows(
+        &mut self,
+        ui: &mut egui::Ui,
+        rows: &[usize],
+    ) -> (Option<GameSort>, Option<dlss_core::GameId>) {
+        let mut requested_upgrade = None;
+        let mut requested_sort = None;
         egui_extras::TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
@@ -376,21 +417,17 @@ impl DlssApp {
                             requested_upgrade = Some(game.id.clone());
                         }
                     });
-                })
+                });
             });
-        if let Some(sort) = requested_sort {
-            self.game_sort = sort;
-        }
-        if rows.is_empty() && !self.games.is_empty() {
+        (requested_sort, requested_upgrade)
+    }
+
+    fn render_game_empty_state(&mut self, ui: &mut egui::Ui, rows_empty: bool) {
+        if rows_empty && !self.games.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(48.0);
                 ui.weak("No games match the current search and filters.");
             });
-        }
-        if let Some(game_id) = requested_upgrade {
-            self.upgrading = Some(game_id.clone());
-            self.toast = Some("Preparing official release…".into());
-            let _ = self.worker.commands.send(Command::UpgradeLatest(game_id));
         }
         if self.games.is_empty() {
             ui.vertical_centered(|ui| {
@@ -404,205 +441,271 @@ impl DlssApp {
                 if ui.button("Add game folder…").clicked()
                     && let Some(root) = rfd::FileDialog::new().pick_folder()
                 {
-                    if !self.persisted.custom_roots.contains(&root) {
-                        self.persisted.custom_roots.push(root.clone());
-                    }
-                    let _ = self.worker.commands.send(Command::AddRoot(root));
+                    self.add_custom_root(&root);
                 }
             });
         }
     }
 
     fn receive_worker_events(&mut self, ctx: &egui::Context) {
-        while let Ok(event) = self.worker.events.try_recv() {
-            match event {
-                Event::ScanStarted => {
-                    self.scanning = true;
-                    self.undo_game = None;
-                    self.last_error = None;
-                }
-                Event::ScanFinished(Ok(games)) => {
-                    self.scanning = false;
-                    let selected_id = self
-                        .selected
-                        .and_then(|index| self.games.get(index))
-                        .map(|game| game.id.clone());
-                    self.games = games.into_iter().map(GameRow::from_install).collect();
-                    self.selected =
-                        selected_id.and_then(|id| self.games.iter().position(|game| game.id == id));
-                    let known_dlls: std::collections::HashSet<_> = self
-                        .games
-                        .iter()
-                        .flat_map(|game| game.details.iter().map(|dll| dll.id.clone()))
-                        .collect();
-                    self.selected_dlls.retain(|id| known_dlls.contains(id));
-                    // Drop profile entries for DLLs that no longer exist (game moved
-                    // or uninstalled) so the persisted profile cannot grow unbounded.
-                    self.persisted
-                        .target_profile
-                        .targets
-                        .retain(|id, _| known_dlls.contains(id));
-                    self.refresh_upgrade_counts();
-                }
-                Event::ScanFinished(Err(error)) => {
-                    self.scanning = false;
-                    self.last_error = Some(error);
-                }
-                Event::CatalogStarted => {
-                    self.catalog_loading = true;
-                    self.catalog_error = None;
-                }
-                Event::CatalogFinished(Ok(snapshot)) => {
-                    self.catalog_loading = false;
-                    self.catalog_release = snapshot.latest;
-                    self.releases = snapshot.releases;
-                    self.catalog_error = None;
-                    self.refresh_upgrade_counts();
-                }
-                Event::CatalogFinished(Err(error)) => {
-                    self.catalog_loading = false;
-                    self.catalog_error = Some(error.clone());
-                    self.last_error = Some(format!("Catalog: {error}"));
-                }
-                Event::ReleaseFinished(Ok(release)) => {
-                    self.inspecting_release = None;
-                    if let Some(existing) = self
-                        .releases
-                        .iter_mut()
-                        .find(|existing| existing.metadata.id == release.metadata.id)
-                    {
-                        *existing = release.clone();
-                    } else {
-                        self.releases.push(release.clone());
+        loop {
+            let event = match self.worker.events.try_recv() {
+                Ok(event) => event,
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    if self.runtime.worker_connected {
+                        self.runtime.worker_connected = false;
+                        self.runtime.scanning = false;
+                        self.runtime.catalog_loading = false;
+                        self.upgrading = None;
+                        self.profiles_applying.clear();
+                        self.last_error = Some("Background worker stopped unexpectedly".into());
                     }
-                    self.toast = Some(format!(
-                        "{} ready: {} production DLLs",
-                        release.metadata.tag,
-                        release.dlls.len()
-                    ));
-                    self.refresh_upgrade_counts();
+                    break;
                 }
-                Event::ReleaseFinished(Err(error)) => {
-                    self.inspecting_release = None;
-                    self.last_error = Some(format!("Release validation: {error}"));
-                }
-                Event::ReleaseProgress {
-                    id,
-                    state,
-                    received,
-                    total,
-                } => {
-                    if let Some(release) = self
-                        .releases
-                        .iter_mut()
-                        .find(|release| release.metadata.id == id)
-                    {
-                        release.state = state;
-                    }
-                    self.toast = Some(progress_label(state, received, total));
-                }
-                Event::UpgradeStarted(game_id) => {
-                    self.upgrading = Some(game_id);
-                    self.undo_game = None;
-                    self.toast = Some("Downloading and validating the official release…".into());
-                }
-                Event::UpgradeFinished {
-                    game_id,
-                    game,
-                    result,
-                } => {
-                    self.upgrading = None;
-                    if let Some(game) = game
-                        && let Some(index) = self.games.iter().position(|row| row.id == game_id)
-                    {
-                        let selected = self.games[index].selected;
-                        self.games[index] = GameRow::from_install(game);
-                        self.games[index].selected = selected;
-                    }
-                    match result {
-                        Ok(report) => {
-                            self.toast = Some(format!(
-                                "{}: changed {}, failed {}",
-                                report.release, report.changed, report.failed
-                            ));
-                            if let Some(warning) = report.warning {
-                                self.last_error = Some(warning.clone());
-                                self.toast = Some(format!(
-                                    "{} · {warning}",
-                                    self.toast.take().unwrap_or_default()
-                                ));
-                            }
-                            if let Some(row) = self.games.iter_mut().find(|row| row.id == game_id) {
-                                row.last_operation = self.toast.clone().unwrap_or_default();
-                            }
-                            self.undo_game = report.can_undo.then(|| game_id.clone());
-                            self.append_activity(dlss_core::ActivityRecord {
-                                timestamp_unix: dlss_core::now_unix(),
-                                kind: if report.release == "Undo" {
-                                    "restore"
-                                } else {
-                                    "dll_swap"
-                                }
-                                .into(),
-                                detail: self.toast.clone().unwrap_or_default(),
-                            });
-                            if self.profiles_applying.remove(&game_id) {
-                                self.clear_game_profile(&game_id);
-                            }
-                        }
-                        Err(error) => {
-                            self.last_error = Some(error.clone());
-                            self.toast = Some(format!("Upgrade failed: {error}"));
-                        }
-                    }
-                    self.refresh_backups();
-                }
-                Event::IndicatorFinished(result) => match result {
-                    Ok(change) => {
-                        // `apply` returns a fresh restore point; `restore` returns none.
-                        let was_apply = change.restore_point.is_some();
-                        self.tool_state = change.state;
-                        if let Some(point) = change.restore_point {
-                            self.persisted.tool_restore_points.push(point);
-                        } else {
-                            self.persisted.tool_restore_points.pop();
-                        }
-                        #[cfg(windows)]
-                        {
-                            if let Ok(after) =
-                                dlss_platform::windows::NvidiaSystemTools.current_snapshot()
-                            {
-                                self.tool_observed_hash =
-                                    Some(dlss_platform::windows::snapshot_hash(&after));
-                            }
-                            self.tool_stale_confirmed = false;
-                        }
-                        self.append_activity(dlss_core::ActivityRecord {
-                            timestamp_unix: dlss_core::now_unix(),
-                            kind: if was_apply {
-                                "tool_change"
-                            } else {
-                                "tool_restore"
-                            }
-                            .into(),
-                            detail: format!("DLSS indicator: {}", state_label(&self.tool_state)),
-                        });
-                        self.toast =
-                            Some(format!("DLSS indicator: {}", state_label(&self.tool_state)));
-                        self.last_error = None;
-                    }
-                    Err(error) => {
-                        self.last_error = Some(error.clone());
-                        self.toast = Some(format!("Indicator change failed: {error}"));
-                    }
-                },
-            }
+            };
+            self.handle_worker_event(event);
             ctx.request_repaint();
         }
     }
 
+    fn handle_worker_event(&mut self, event: Event) {
+        match event {
+            Event::Warning(warning) => {
+                tracing::warn!(%warning, "worker warning");
+                self.last_error = Some(warning);
+            }
+            Event::ScanStarted => self.handle_scan_started(),
+            Event::ScanFinished(result) => self.handle_scan_finished(result),
+            Event::CatalogStarted => {
+                self.runtime.catalog_loading = true;
+                self.catalog_error = None;
+            }
+            Event::CatalogFinished(result) => self.handle_catalog_finished(result),
+            Event::ReleaseFinished(result) => self.handle_release_finished(result),
+            Event::ReleaseProgress {
+                id,
+                state,
+                received,
+                total,
+            } => {
+                self.handle_release_progress(&id, state, received, total);
+            }
+            Event::UpgradeStarted(game_id) => {
+                self.upgrading = Some(game_id);
+                self.undo_game = None;
+                self.toast = Some("Downloading and validating the official release…".into());
+            }
+            Event::UpgradeFinished {
+                game_id,
+                game,
+                result,
+            } => {
+                self.handle_upgrade_finished(&game_id, game, result);
+            }
+            #[cfg(windows)]
+            Event::IndicatorFinished(result) => self.handle_indicator_finished(result),
+        }
+    }
+
+    fn handle_scan_started(&mut self) {
+        self.runtime.scanning = true;
+        self.undo_game = None;
+        self.last_error = None;
+    }
+
+    fn handle_scan_finished(
+        &mut self,
+        result: Result<Vec<dlss_core::GameInstall>, worker::WorkerError>,
+    ) {
+        self.runtime.scanning = false;
+        let Ok(games) = result else {
+            self.last_error = result.err().map(|error| error.to_string());
+            return;
+        };
+        let selected_id = self
+            .selected
+            .and_then(|index| self.games.get(index))
+            .map(|game| game.id.clone());
+        self.games = games.into_iter().map(GameRow::from_install).collect();
+        self.selected = selected_id.and_then(|id| self.games.iter().position(|game| game.id == id));
+        let known_dlls: std::collections::HashSet<_> = self
+            .games
+            .iter()
+            .flat_map(|game| game.details.iter().map(|dll| dll.id.clone()))
+            .collect();
+        self.selected_dlls.retain(|id| known_dlls.contains(id));
+        self.persisted
+            .target_profile
+            .targets
+            .retain(|id, _| known_dlls.contains(id));
+        self.refresh_upgrade_counts();
+    }
+
+    fn handle_catalog_finished(
+        &mut self,
+        result: Result<worker::CatalogSnapshot, worker::WorkerError>,
+    ) {
+        self.runtime.catalog_loading = false;
+        match result {
+            Ok(snapshot) => {
+                self.catalog_release = snapshot.latest;
+                self.releases = snapshot.releases;
+                self.catalog_error = None;
+                self.refresh_upgrade_counts();
+            }
+            Err(error) => {
+                self.catalog_error = Some(error.to_string());
+                self.last_error = Some(format!("Catalog: {error}"));
+            }
+        }
+    }
+
+    fn handle_release_finished(
+        &mut self,
+        result: Result<dlss_core::CachedRelease, worker::WorkerError>,
+    ) {
+        self.inspecting_release = None;
+        match result {
+            Ok(release) => {
+                if let Some(existing) = self
+                    .releases
+                    .iter_mut()
+                    .find(|existing| existing.metadata.id == release.metadata.id)
+                {
+                    existing.clone_from(&release);
+                } else {
+                    self.releases.push(release.clone());
+                }
+                self.toast = Some(format!(
+                    "{} ready: {} production DLLs",
+                    release.metadata.tag,
+                    release.dlls.len()
+                ));
+                self.refresh_upgrade_counts();
+            }
+            Err(error) => self.last_error = Some(format!("Release validation: {error}")),
+        }
+    }
+
+    fn handle_release_progress(
+        &mut self,
+        id: &dlss_core::ReleaseId,
+        state: dlss_core::ReleaseState,
+        received: u64,
+        total: Option<u64>,
+    ) {
+        if let Some(release) = self
+            .releases
+            .iter_mut()
+            .find(|release| &release.metadata.id == id)
+        {
+            release.state = state;
+        }
+        self.toast = Some(progress_label(state, received, total));
+    }
+
+    fn handle_upgrade_finished(
+        &mut self,
+        game_id: &dlss_core::GameId,
+        game: Option<dlss_core::GameInstall>,
+        result: Result<worker::UpgradeReport, worker::WorkerError>,
+    ) {
+        self.upgrading = None;
+        let applying_profile = self.profiles_applying.remove(game_id);
+        if let Some(game) = game
+            && let Some(index) = self.games.iter().position(|row| &row.id == game_id)
+        {
+            let selected = self.games[index].selected;
+            self.games[index] = GameRow::from_install(game);
+            self.games[index].selected = selected;
+        }
+        match result {
+            Ok(report) => self.handle_upgrade_report(game_id, applying_profile, report),
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                self.toast = Some(format!("Upgrade failed: {error}"));
+            }
+        }
+        self.refresh_backups();
+    }
+
+    fn handle_upgrade_report(
+        &mut self,
+        game_id: &dlss_core::GameId,
+        applying_profile: bool,
+        report: worker::UpgradeReport,
+    ) {
+        self.toast = Some(format!(
+            "{}: changed {}, failed {}",
+            report.release, report.changed, report.failed
+        ));
+        if let Some(warning) = report.warning {
+            self.last_error = Some(warning.clone());
+            self.toast = Some(format!(
+                "{} · {warning}",
+                self.toast.take().unwrap_or_default()
+            ));
+        }
+        if let Some(row) = self.games.iter_mut().find(|row| &row.id == game_id) {
+            row.last_operation = self.toast.clone().unwrap_or_default();
+        }
+        self.undo_game = report.can_undo.then(|| game_id.clone());
+        self.append_activity(dlss_core::ActivityRecord {
+            timestamp_unix: dlss_core::now_unix(),
+            kind: if report.release == "Undo" {
+                "restore"
+            } else {
+                "dll_swap"
+            }
+            .into(),
+            detail: self.toast.clone().unwrap_or_default(),
+        });
+        if applying_profile {
+            self.clear_game_profile(game_id);
+        }
+    }
+
+    #[cfg(windows)]
+    fn handle_indicator_finished(
+        &mut self,
+        result: Result<dlss_core::ToolChangeResult, worker::WorkerError>,
+    ) {
+        let change = match result {
+            Ok(change) => change,
+            Err(error) => {
+                self.last_error = Some(error.to_string());
+                self.toast = Some(format!("Indicator change failed: {error}"));
+                return;
+            }
+        };
+        let was_apply = change.restore_point.is_some();
+        self.tool_state = change.state;
+        if let Some(point) = change.restore_point {
+            self.persisted.tool_restore_points.push(point);
+        } else {
+            self.persisted.tool_restore_points.pop();
+        }
+        if let Ok(after) = dlss_platform::windows::NvidiaSystemTools.current_snapshot() {
+            self.tool_runtime.observed_hash = Some(dlss_platform::windows::snapshot_hash(&after));
+        }
+        self.tool_runtime.stale_confirmed = false;
+        self.append_activity(dlss_core::ActivityRecord {
+            timestamp_unix: dlss_core::now_unix(),
+            kind: if was_apply {
+                "tool_change"
+            } else {
+                "tool_restore"
+            }
+            .into(),
+            detail: format!("DLSS indicator: {}", state_label(&self.tool_state)),
+        });
+        self.toast = Some(format!("DLSS indicator: {}", state_label(&self.tool_state)));
+        self.last_error = None;
+    }
+
     fn tools_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_tools;
+        let mut open = self.open_windows.contains(&AppWindow::Tools);
         egui::Window::new("Global Tools").open(&mut open).default_width(520.0).show(ctx, |ui| {
             ui.colored_label(egui::Color32::YELLOW, "Global setting — affects all compatible games on this PC");
             ui.add_space(8.0); ui.heading("DLSS on-screen indicator");
@@ -632,11 +735,11 @@ impl DlssApp {
                 ui.small("If another program changes this value, confirmation is required before apply or restore.");
             });
         });
-        self.show_tools = open;
+        self.set_window_open(AppWindow::Tools, open);
     }
 
     fn releases_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_releases;
+        let mut open = self.open_windows.contains(&AppWindow::Releases);
         egui::Window::new("Official Streamline releases")
             .open(&mut open)
             .default_width(620.0)
@@ -644,12 +747,12 @@ impl DlssApp {
                 ui.label("Older releases remain metadata-only until requested. Validated production DLLs are then available in per-DLL selectors.");
                 ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(!self.catalog_loading, egui::Button::new("Refresh catalog"))
+                        .add_enabled(!self.runtime.catalog_loading, egui::Button::new("Refresh catalog"))
                         .clicked()
                     {
                         let _ = self.worker.commands.send(Command::RefreshCatalog);
                     }
-                    if self.catalog_loading {
+                    if self.runtime.catalog_loading {
                         ui.spinner();
                         ui.label("Loading official releases…");
                     }
@@ -658,7 +761,7 @@ impl DlssApp {
                 if let Some(error) = &self.catalog_error {
                     ui.colored_label(egui::Color32::RED, format!("Catalog request failed: {error}"));
                     ui.label("Check network access and try Refresh catalog. Previously cached releases remain usable when available.");
-                } else if !self.catalog_loading && self.releases.is_empty() {
+                } else if !self.runtime.catalog_loading && self.releases.is_empty() {
                     ui.weak("GitHub returned no matching stable Streamline SDK release archives.");
                 }
                 egui::ScrollArea::vertical().show(ui, |ui| {
@@ -693,11 +796,11 @@ impl DlssApp {
                     }
                 });
             });
-        self.show_releases = open;
+        self.set_window_open(AppWindow::Releases, open);
     }
 
     fn activity_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_activity;
+        let mut open = self.open_windows.contains(&AppWindow::Activity);
         egui::Window::new("Activity history")
             .open(&mut open)
             .default_width(560.0)
@@ -716,12 +819,11 @@ impl DlssApp {
                     }
                 });
             });
-        self.show_activity = open;
+        self.set_window_open(AppWindow::Activity, open);
     }
 
     fn roots_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.show_roots;
-        let mut remove = None;
+        let mut open = self.open_windows.contains(&AppWindow::Roots);
         egui::Window::new("Game folders")
             .open(&mut open)
             .default_width(620.0)
@@ -732,32 +834,38 @@ impl DlssApp {
                     ui.weak("No manual roots configured.");
                 }
                 for root in &self.persisted.custom_roots {
-                    ui.horizontal(|ui| {
-                        ui.monospace(root.display().to_string());
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Remove").clicked() {
-                                remove = Some(root.clone());
-                            }
-                        });
-                    });
+                    ui.monospace(root.display().to_string());
                 }
                 ui.add_space(8.0);
                 if ui.button("Add game folder…").clicked()
                     && let Some(root) = rfd::FileDialog::new().pick_folder()
                 {
-                    if !self.persisted.custom_roots.contains(&root) {
-                        self.persisted.custom_roots.push(root.clone());
-                    }
-                    let _ = self.worker.commands.send(Command::AddRoot(root));
+                    self.add_custom_root(&root);
                 }
             });
-        if let Some(root) = remove {
-            self.persisted
-                .custom_roots
-                .retain(|candidate| candidate != &root);
-            let _ = self.worker.commands.send(Command::RemoveRoot(root));
+        self.set_window_open(AppWindow::Roots, open);
+    }
+
+    fn add_custom_root(&mut self, root: &std::path::Path) {
+        match root.canonicalize() {
+            Ok(root) => {
+                if !self.persisted.custom_roots.contains(&root) {
+                    self.persisted.custom_roots.push(root.clone());
+                }
+                let _ = self.worker.commands.send(Command::AddRoot(root));
+            }
+            Err(error) => {
+                self.last_error = Some(format!("Could not add {}: {error}", root.display()));
+            }
         }
-        self.show_roots = open;
+    }
+
+    fn set_window_open(&mut self, window: AppWindow, open: bool) {
+        if open {
+            self.open_windows.insert(window);
+        } else {
+            self.open_windows.remove(&window);
+        }
     }
 
     fn append_activity(&mut self, record: dlss_core::ActivityRecord) {
@@ -779,16 +887,25 @@ impl DlssApp {
         ) {
             (Ok(state), Ok(snapshot)) => {
                 self.tool_state = state;
-                self.tool_observed_hash = Some(dlss_platform::windows::snapshot_hash(&snapshot));
-                self.tool_stale_confirmed = false;
+                self.tool_runtime.observed_hash =
+                    Some(dlss_platform::windows::snapshot_hash(&snapshot));
+                self.tool_runtime.stale_confirmed = false;
                 self.last_error = None;
             }
             (Err(error), _) | (_, Err(error)) => self.last_error = Some(error.to_string()),
         }
+        #[cfg(not(windows))]
+        {
+            self.tool_state = SystemToolState::Unavailable(
+                "Windows NVIDIA registry controls are unavailable".into(),
+            );
+        }
     }
 
     #[cfg(not(windows))]
-    fn change_indicator(&mut self, _restore: bool) {}
+    fn change_indicator(&mut self, _restore: bool) {
+        self.last_error = Some("Registry controls are available only on Windows".into());
+    }
 
     /// Performs the fast stale-hash confirmation on the UI thread, then hands the
     /// slow, blocking elevation to the worker so the window never freezes behind
@@ -806,9 +923,10 @@ impl DlssApp {
         };
         let current_hash = dlss_platform::windows::snapshot_hash(&current);
         if self
-            .tool_observed_hash
+            .tool_runtime
+            .observed_hash
             .is_some_and(|observed| observed != current_hash)
-            && !self.tool_stale_confirmed
+            && !self.tool_runtime.stale_confirmed
         {
             match provider.read(&dlss_core::SystemToolId(
                 dlss_core::DLSS_INDICATOR_TOOL_ID.into(),
@@ -819,19 +937,17 @@ impl DlssApp {
                     return;
                 }
             }
-            self.tool_observed_hash = Some(current_hash);
-            self.tool_stale_confirmed = true;
+            self.tool_runtime.observed_hash = Some(current_hash);
+            self.tool_runtime.stale_confirmed = true;
             self.last_error = Some("The registry value changed outside DLSS Updater. Review the new state, then click again to confirm overwriting it.".into());
             return;
         }
         let restore_point = if restore {
-            match self.persisted.tool_restore_points.last().cloned() {
-                Some(point) => Some(point),
-                None => {
-                    self.last_error = Some("no restore point is available".into());
-                    return;
-                }
-            }
+            let Some(point) = self.persisted.tool_restore_points.last().cloned() else {
+                self.last_error = Some("no restore point is available".into());
+                return;
+            };
+            Some(point)
         } else {
             None
         };
@@ -839,7 +955,7 @@ impl DlssApp {
             desired: self.staged_tool_state.clone(),
             restore_point,
             expected_current_hash: current_hash,
-            allow_stale_restore: restore && self.tool_stale_confirmed,
+            allow_stale_restore: restore && self.tool_runtime.stale_confirmed,
         };
         self.last_error = None;
         self.toast = Some(
@@ -899,12 +1015,19 @@ impl DlssApp {
 
     fn refresh_backups(&mut self) {
         #[cfg(windows)]
-        if let Ok(base) = dlss_platform::windows::WindowsKnownDirectories.local_app_data()
-            && let Ok(index) =
+        match dlss_platform::windows::WindowsKnownDirectories
+            .local_app_data()
+            .and_then(|base| {
                 dlss_core::BackupStore::new(base.join("DLSS Updater/backups")).load_index()
-        {
-            self.backups = index.records;
+            }) {
+            Ok(index) => self.backups = index.records,
+            Err(error) => {
+                tracing::warn!(%error, "could not refresh backup history");
+                self.last_error = Some(format!("Could not refresh backup history: {error}"));
+            }
         }
+        #[cfg(not(windows))]
+        self.backups.clear();
     }
 
     fn review_window(&mut self, ctx: &egui::Context) {
@@ -924,80 +1047,7 @@ impl DlssApp {
                     "Each DLL is re-inspected, backed up, replaced independently, and verified.",
                 );
                 ui.add_space(8.0);
-                match &review {
-                    ReviewKind::BulkLatest(ids) => {
-                        let dlls: usize = self
-                            .games
-                            .iter()
-                            .filter(|game| ids.contains(&game.id))
-                            .map(|game| game.dlls)
-                            .sum();
-                        ui.heading(format!("{} games · {dlls} candidate DLLs", ids.len()));
-                        let latest = self.latest_catalog();
-                        let upgrades: usize = self
-                            .games
-                            .iter()
-                            .filter(|game| ids.contains(&game.id))
-                            .map(|game| {
-                                dlss_core::plan_strict_upgrades(
-                                    "preview",
-                                    &game.details,
-                                    &latest,
-                                )
-                                .swaps
-                                .len()
-                            })
-                            .sum();
-                        ui.label(format!(
-                            "{upgrades} confirmed upgrades · {} download requirement",
-                            usize::from(latest.is_empty())
-                        ));
-                        ui.label("Only strictly newer, same-named official DLLs will change. Unknown, equal, newer, and different-build DLLs are preserved.");
-                    }
-                    ReviewKind::Profiles(game_ids) => {
-                        let count: usize = game_ids
-                            .iter()
-                            .map(|game_id| {
-                                self.profile_for_game(game_id)
-                                    .targets
-                                    .values()
-                                    .filter(|target| {
-                                        **target != dlss_core::DesiredDll::KeepInstalled
-                                    })
-                                    .count()
-                            })
-                            .sum();
-                        ui.heading(format!("{count} staged DLL targets"));
-                        for game_id in game_ids {
-                            match self.preview_profile(game_id) {
-                                Ok(plan) => {
-                                    let summary = plan.summary();
-                                    ui.label(format!(
-                                        "{} upgrades · {} downgrades · {} other changes",
-                                        summary.upgrades,
-                                        summary.downgrades,
-                                        summary
-                                            .dlls
-                                            .saturating_sub(summary.upgrades + summary.downgrades)
-                                    ));
-                                    for swap in plan.swaps {
-                                        ui.small(format!(
-                                            "{:?}  {}",
-                                            swap.comparison,
-                                            swap.target_path.display()
-                                        ));
-                                    }
-                                }
-                                Err(error) => {
-                                    ui.label(format!(
-                                        "1 download/validation requirement · {error}"
-                                    ));
-                                }
-                            }
-                        }
-                        ui.label("Advanced targets may upgrade, downgrade, restore, or install a different official build.");
-                    }
-                }
+                self.render_review_summary(ui, &review);
                 ui.weak("If Windows denies access to a target, the app will request elevation only for the denied replacements.");
                 ui.add_space(10.0);
                 ui.horizontal(|ui| {
@@ -1011,31 +1061,108 @@ impl DlssApp {
             keep_open = false;
         }
         if apply {
-            match &review {
-                ReviewKind::BulkLatest(ids) => {
-                    for id in ids {
-                        let _ = self
-                            .worker
-                            .commands
-                            .send(Command::UpgradeLatest(id.clone()));
-                    }
-                }
-                ReviewKind::Profiles(game_ids) => {
-                    for game_id in game_ids {
-                        let profile = self.profile_for_game(game_id);
-                        self.profiles_applying.insert(game_id.clone());
-                        let _ = self
-                            .worker
-                            .commands
-                            .send(Command::ApplyProfile(game_id.clone(), profile));
-                    }
-                }
-            }
+            self.queue_review(&review);
             self.toast = Some("Operation queued…".into());
             keep_open = false;
         }
         if keep_open {
             self.review = Some(review);
+        }
+    }
+
+    fn render_review_summary(&self, ui: &mut egui::Ui, review: &ReviewKind) {
+        match review {
+            ReviewKind::BulkLatest(ids) => {
+                let dlls: usize = self
+                    .games
+                    .iter()
+                    .filter(|game| ids.contains(&game.id))
+                    .map(|game| game.dlls)
+                    .sum();
+                ui.heading(format!("{} games · {dlls} candidate DLLs", ids.len()));
+                let latest = self.latest_catalog();
+                let upgrades: usize = self
+                    .games
+                    .iter()
+                    .filter(|game| ids.contains(&game.id))
+                    .map(|game| {
+                        dlss_core::plan_strict_upgrades("preview", &game.details, &latest)
+                            .swaps
+                            .len()
+                    })
+                    .sum();
+                ui.label(format!(
+                    "{upgrades} confirmed upgrades · {} download requirement",
+                    usize::from(latest.is_empty())
+                ));
+                ui.label("Only strictly newer, same-named official DLLs will change. Unknown, equal, newer, and different-build DLLs are preserved.");
+            }
+            ReviewKind::Profiles(game_ids) => self.render_profile_review(ui, game_ids),
+        }
+    }
+
+    fn render_profile_review(&self, ui: &mut egui::Ui, game_ids: &[dlss_core::GameId]) {
+        let count: usize = game_ids
+            .iter()
+            .map(|id| {
+                self.profile_for_game(id)
+                    .targets
+                    .values()
+                    .filter(|target| **target != dlss_core::DesiredDll::KeepInstalled)
+                    .count()
+            })
+            .sum();
+        ui.heading(format!("{count} staged DLL targets"));
+        for game_id in game_ids {
+            match self.preview_profile(game_id) {
+                Ok(plan) => {
+                    let summary = plan.summary();
+                    ui.label(format!(
+                        "{} upgrades · {} downgrades · {} other changes",
+                        summary.upgrades,
+                        summary.downgrades,
+                        summary
+                            .dlls
+                            .saturating_sub(summary.upgrades + summary.downgrades)
+                    ));
+                    for swap in plan.swaps {
+                        ui.small(format!(
+                            "{:?}  {}",
+                            swap.comparison,
+                            swap.target_path.display()
+                        ));
+                    }
+                }
+                Err(error) => {
+                    ui.label(format!("1 download/validation requirement · {error}"));
+                }
+            }
+        }
+        ui.label(
+            "Advanced targets may upgrade, downgrade, restore, or install a different official build.",
+        );
+    }
+
+    fn queue_review(&mut self, review: &ReviewKind) {
+        match review {
+            ReviewKind::BulkLatest(ids) => {
+                for id in ids {
+                    let _ = self
+                        .worker
+                        .commands
+                        .send(Command::UpgradeLatest(id.clone()));
+                }
+            }
+            ReviewKind::Profiles(game_ids) => {
+                for game_id in game_ids {
+                    let profile = self.profile_for_game(game_id);
+                    self.profiles_applying.insert(game_id.clone());
+                    let _ = self
+                        .worker
+                        .commands
+                        .send(Command::ApplyProfile(game_id.clone(), profile));
+                }
+            }
         }
     }
 
@@ -1095,6 +1222,17 @@ impl DlssApp {
     }
 }
 
+fn canonicalize_roots(roots: &mut Vec<std::path::PathBuf>) {
+    let mut normalized = Vec::with_capacity(roots.len());
+    for root in roots.drain(..) {
+        let root = root.canonicalize().unwrap_or(root);
+        if !normalized.contains(&root) {
+            normalized.push(root);
+        }
+    }
+    *roots = normalized;
+}
+
 impl eframe::App for DlssApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive_worker_events(ctx);
@@ -1103,6 +1241,10 @@ impl eframe::App for DlssApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         eframe::set_value(storage, eframe::APP_KEY, &self.persisted);
     }
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the eframe root method declaratively composes independent panels and overlays"
+    )]
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("toolbar").show(root, |ui| {
             ui.add_space(5.0);
@@ -1164,10 +1306,10 @@ impl eframe::App for DlssApp {
                                         },
                                         format!(
                                             "Restore {} · {}",
-                                            backup
-                                                .version
-                                                .map(|version| version.to_string())
-                                                .unwrap_or_else(|| "Unknown".into()),
+                                            backup.version.map_or_else(
+                                                || "Unknown".into(),
+                                                |version| version.to_string(),
+                                            ),
                                             format_timestamp(backup.created_unix)
                                         ),
                                     )
@@ -1190,10 +1332,10 @@ impl eframe::App for DlssApp {
                                 ui.horizontal(|ui| {
                                     ui.label("Installed:");
                                     ui.monospace(
-                                        dll.metadata
-                                            .version
-                                            .map(|version| version.to_string())
-                                            .unwrap_or_else(|| "Unknown".into()),
+                                        dll.metadata.version.map_or_else(
+                                            || "Unknown".into(),
+                                            |version| version.to_string(),
+                                        ),
                                     );
                                 });
                                 ui.label(format!("Signature: {:?}", dll.metadata.signature));
@@ -1207,10 +1349,9 @@ impl eframe::App for DlssApp {
                                         )
                                     })
                                     .max_by_key(|candidate| (candidate.version, candidate.sha256))
-                                    .map(|target| {
+                                    .map_or(dlss_core::Comparison::Unavailable, |target| {
                                         dlss_core::compare_dll(Some(&dll.metadata), Some(&target))
-                                    })
-                                    .unwrap_or(dlss_core::Comparison::Unavailable);
+                                    });
                                 ui.label(format!("Latest comparison: {comparison:?}"));
                                 ui.horizontal(|ui| {
                                     ui.label("Desired:");
@@ -1375,16 +1516,16 @@ impl eframe::App for DlssApp {
                 });
             });
         }
-        if self.show_tools {
+        if self.open_windows.contains(&AppWindow::Tools) {
             self.tools_window(root.ctx());
         }
-        if self.show_releases {
+        if self.open_windows.contains(&AppWindow::Releases) {
             self.releases_window(root.ctx());
         }
-        if self.show_activity {
+        if self.open_windows.contains(&AppWindow::Activity) {
             self.activity_window(root.ctx());
         }
-        if self.show_roots {
+        if self.open_windows.contains(&AppWindow::Roots) {
             self.roots_window(root.ctx());
         }
         if self.review.is_some() {

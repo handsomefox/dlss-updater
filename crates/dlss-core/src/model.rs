@@ -50,6 +50,7 @@ pub struct DllVersion {
 }
 
 impl DllVersion {
+    #[must_use]
     pub const fn new(major: u16, minor: u16, build: u16, revision: u16) -> Self {
         Self {
             major,
@@ -138,6 +139,7 @@ pub enum Comparison {
     Unavailable,
 }
 
+#[must_use]
 pub fn compare_target(
     installed_version: Option<DllVersion>,
     installed_hash: [u8; 32],
@@ -157,6 +159,7 @@ pub fn compare_target(
     }
 }
 
+#[must_use]
 pub fn compare_dll(installed: Option<&DllMetadata>, target: Option<&CatalogDll>) -> Comparison {
     match (installed, target) {
         (Some(installed), Some(target)) => compare_target(
@@ -214,6 +217,7 @@ pub struct PlanSummary {
 }
 
 impl OperationPlan {
+    #[must_use]
     pub fn summary(&self) -> PlanSummary {
         let games: std::collections::HashSet<_> =
             self.swaps.iter().map(|swap| &swap.game).collect();
