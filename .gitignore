@@ -1,7 +1,9 @@
-/target
+/.agents
+/.codex
 /dist
-streamline-sdk-v*.zip
-PLAN.md
+/target
 AGENTS.md
 CLAUDE.md
+PLAN.md
+streamline-sdk-v*.zip
 streamline-sdk-v2.12.0.zip
