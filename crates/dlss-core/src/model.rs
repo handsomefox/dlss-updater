@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, ffi::OsString, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    ffi::{OsStr, OsString},
+    path::PathBuf,
+};
 
 macro_rules! string_id {
     ($name:ident) => {
@@ -28,6 +32,85 @@ pub enum StoreKind {
     Epic,
     Gog,
     Manual,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum DiscoveryStatus {
+    Found,
+    NotDetected,
+    Error,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct StoreDiscoveryReport {
+    pub store: String,
+    pub status: DiscoveryStatus,
+    pub games_found: usize,
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveryOutcome {
+    pub games: Vec<GameInstall>,
+    pub reports: Vec<StoreDiscoveryReport>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+pub enum DllKind {
+    DlssSuperResolution,
+    DlssFrameGeneration,
+    DlssRayReconstruction,
+    OtherNgx,
+    Streamline,
+    ReflexLowLatency,
+}
+
+impl DllKind {
+    #[must_use]
+    #[expect(
+        clippy::case_sensitive_file_extension_comparisons,
+        reason = "the file name is normalized to ASCII lowercase before matching"
+    )]
+    pub fn classify(file_name: &OsStr) -> Option<Self> {
+        let name = file_name.to_str()?.to_ascii_lowercase();
+        match name.as_str() {
+            "nvngx_dlss.dll" => Some(Self::DlssSuperResolution),
+            "nvngx_dlssg.dll" => Some(Self::DlssFrameGeneration),
+            "nvngx_dlssd.dll" => Some(Self::DlssRayReconstruction),
+            "nvlowlatencyvk.dll" => Some(Self::ReflexLowLatency),
+            _ if name.starts_with("nvngx_") && name.ends_with(".dll") => Some(Self::OtherNgx),
+            _ if name.starts_with("sl.") && name.ends_with(".dll") => Some(Self::Streamline),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_dlss_family(self) -> bool {
+        matches!(
+            self,
+            Self::DlssSuperResolution | Self::DlssFrameGeneration | Self::DlssRayReconstruction
+        )
+    }
+}
+
+#[must_use]
+pub fn friendly_dll_label(file_name: &OsStr) -> String {
+    match DllKind::classify(file_name) {
+        Some(DllKind::DlssSuperResolution) => "DLSS Super Resolution".into(),
+        Some(DllKind::DlssFrameGeneration) => "DLSS Frame Generation".into(),
+        Some(DllKind::DlssRayReconstruction) => "DLSS Ray Reconstruction".into(),
+        Some(DllKind::ReflexLowLatency) => "NVIDIA Reflex Low Latency".into(),
+        Some(DllKind::Streamline) => {
+            let raw = file_name.to_string_lossy();
+            let normalized = raw.to_ascii_lowercase();
+            let component = normalized
+                .strip_prefix("sl.")
+                .and_then(|name| name.strip_suffix(".dll"))
+                .unwrap_or(&normalized);
+            format!("Streamline — {component}")
+        }
+        Some(DllKind::OtherNgx) | None => file_name.to_string_lossy().into_owned(),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -331,6 +414,48 @@ mod tests {
         assert_eq!(
             compare_dll(Some(&meta(Some(v), 1)), None),
             Comparison::Unavailable
+        );
+    }
+
+    #[test]
+    fn classifies_managed_dll_families_and_labels() {
+        assert_eq!(
+            DllKind::classify(OsStr::new("NVNGX_DLSS.DLL")),
+            Some(DllKind::DlssSuperResolution)
+        );
+        assert_eq!(
+            DllKind::classify(OsStr::new("nvngx_dlssg.dll")),
+            Some(DllKind::DlssFrameGeneration)
+        );
+        assert_eq!(
+            DllKind::classify(OsStr::new("nvngx_dlssd.dll")),
+            Some(DllKind::DlssRayReconstruction)
+        );
+        assert_eq!(
+            DllKind::classify(OsStr::new("sl.interposer.dll")),
+            Some(DllKind::Streamline)
+        );
+        assert_eq!(DllKind::classify(OsStr::new("dxgi.dll")), None);
+        assert!(DllKind::DlssSuperResolution.is_dlss_family());
+        assert!(!DllKind::Streamline.is_dlss_family());
+        assert_eq!(
+            friendly_dll_label(OsStr::new("sl.interposer.dll")),
+            "Streamline — interposer"
+        );
+        assert_eq!(friendly_dll_label(OsStr::new("unknown.dll")), "unknown.dll");
+        assert_eq!(
+            friendly_dll_label(OsStr::new("SL.INTERPOSER.DLL")),
+            "Streamline — interposer"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_non_utf8_dll_names() {
+        use std::os::unix::ffi::OsStrExt;
+        assert_eq!(
+            DllKind::classify(OsStr::from_bytes(b"nvngx_\xff.dll")),
+            None
         );
     }
 }

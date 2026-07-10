@@ -33,13 +33,22 @@ pub(crate) enum Command {
     Scan,
     RefreshCatalog,
     InspectRelease(ReleaseId),
-    UpgradeLatest(GameId),
+    RemoveRelease(ReleaseId),
+    UpgradeLatest(GameId, UpgradeScope),
     ApplyProfile(GameId, TargetProfile),
     UndoLast(GameId),
     AddRoot(PathBuf),
+    ImportDll(PathBuf),
+    RemoveImport([u8; 32]),
     #[cfg(windows)]
     ChangeIndicator(IndicatorRequest),
     Shutdown,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum UpgradeScope {
+    AllManaged,
+    DlssOnly,
 }
 
 /// A prepared request to change the DLSS indicator. The caller performs the
@@ -71,10 +80,14 @@ pub(crate) struct CatalogSnapshot {
 pub(crate) enum Event {
     Warning(String),
     ScanStarted,
-    ScanFinished(WorkerResult<Vec<GameInstall>>),
+    ScanFinished(WorkerResult<dlss_core::DiscoveryOutcome>),
     CatalogStarted,
     CatalogFinished(WorkerResult<CatalogSnapshot>),
     ReleaseFinished(WorkerResult<dlss_core::CachedRelease>),
+    ReleaseRemoved(WorkerResult<ReleaseId>),
+    ImportFinished(WorkerResult<dlss_core::ImportedDllRecord>),
+    ImportRemoved(WorkerResult<[u8; 32]>),
+    ImportsLoaded(Vec<dlss_core::ImportedDllRecord>),
     ReleaseProgress {
         id: ReleaseId,
         state: dlss_core::ReleaseState,
@@ -138,6 +151,7 @@ struct WorkerState {
     catalog: CatalogCacheIndex,
     assets: Vec<OfficialAsset>,
     undo_plans: HashMap<GameId, dlss_core::OperationPlan>,
+    imports: dlss_core::ImportIndex,
 }
 
 fn run(commands: &Receiver<Command>, events: &EventSink, mut roots: Vec<PathBuf>) {
@@ -156,6 +170,7 @@ fn run(commands: &Receiver<Command>, events: &EventSink, mut roots: Vec<PathBuf>
             CatalogCacheIndex::default()
         }
     };
+    let imports = load_imports(events);
     let mut state = WorkerState {
         roots,
         games: Vec::new(),
@@ -163,7 +178,9 @@ fn run(commands: &Receiver<Command>, events: &EventSink, mut roots: Vec<PathBuf>
         assets: catalog.assets.clone(),
         catalog,
         undo_plans: HashMap::new(),
+        imports,
     };
+    events.send(Event::ImportsLoaded(state.imports.records.clone()));
     while let Ok(command) = commands.recv() {
         let span = tracing::info_span!("worker_command", command = command_name(&command));
         let _entered = span.enter();
@@ -179,10 +196,13 @@ fn command_name(command: &Command) -> &'static str {
         Command::Scan => "scan",
         Command::RefreshCatalog => "refresh_catalog",
         Command::InspectRelease(_) => "inspect_release",
-        Command::UpgradeLatest(_) => "upgrade_latest",
+        Command::RemoveRelease(_) => "remove_release",
+        Command::UpgradeLatest(_, _) => "upgrade_latest",
         Command::ApplyProfile(_, _) => "apply_profile",
         Command::UndoLast(_) => "undo_last",
         Command::AddRoot(_) => "add_root",
+        Command::ImportDll(_) => "import_dll",
+        Command::RemoveImport(_) => "remove_import",
         #[cfg(windows)]
         Command::ChangeIndicator(_) => "change_indicator",
         Command::Shutdown => "shutdown",
@@ -199,10 +219,13 @@ fn dispatch(command: Command, events: &EventSink, state: &mut WorkerState) -> bo
             state.catalog_path.as_deref(),
         ),
         Command::InspectRelease(id) => inspect_release_command(id, events, state),
-        Command::UpgradeLatest(id) => upgrade_command(id, events, state),
+        Command::RemoveRelease(id) => remove_release_command(id, events, state),
+        Command::UpgradeLatest(id, scope) => upgrade_command(id, scope, events, state),
         Command::ApplyProfile(id, profile) => profile_command(id, &profile, events, state),
         Command::UndoLast(id) => undo_command(id, events, state),
         Command::AddRoot(root) => add_root_command(&root, events, state),
+        Command::ImportDll(path) => import_command(&path, events, state),
+        Command::RemoveImport(hash) => remove_import_command(hash, events, state),
         #[cfg(windows)]
         Command::ChangeIndicator(request) => {
             events.send(Event::IndicatorFinished(change_indicator(request)));
@@ -231,6 +254,9 @@ fn inspect_release_command(id: ReleaseId, events: &EventSink, state: &mut Worker
             })
         });
     if result.is_err() {
+        if let Err(error) = &result {
+            tracing::warn!(release = %id.0, %error, "release inspection failed");
+        }
         events.send(Event::ReleaseProgress {
             id,
             state: dlss_core::ReleaseState::Invalid,
@@ -251,7 +277,44 @@ fn inspect_release_command(id: ReleaseId, events: &EventSink, state: &mut Worker
     events.send(Event::ReleaseFinished(result));
 }
 
-fn upgrade_command(id: GameId, events: &EventSink, state: &mut WorkerState) {
+fn remove_release_command(id: ReleaseId, events: &EventSink, state: &mut WorkerState) {
+    let result = remove_release_files(&id).and_then(|()| {
+        state.catalog.remove_release(&id);
+        if let Some(path) = &state.catalog_path {
+            state.catalog.save(path)?;
+        }
+        Ok(id)
+    });
+    events.send(Event::ReleaseRemoved(result));
+}
+
+#[cfg(windows)]
+fn remove_release_files(id: &ReleaseId) -> WorkerResult<()> {
+    let component = safe_component(&id.0)?;
+    let base = dlss_platform::windows::WindowsKnownDirectories
+        .local_app_data()?
+        .join("DLSS Updater/cache");
+    for path in [
+        base.join("archives").join(format!("{component}.zip")),
+        base.join("releases").join(component),
+    ] {
+        if path.is_dir() {
+            std::fs::remove_dir_all(path)?;
+        } else if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn remove_release_files(_id: &ReleaseId) -> WorkerResult<()> {
+    Err(WorkerError::Unavailable(
+        "Release downloads are available only in Windows builds",
+    ))
+}
+
+fn upgrade_command(id: GameId, scope: UpgradeScope, events: &EventSink, state: &mut WorkerState) {
     let Some(game) = begin_game_operation(&id, events, state) else {
         return;
     };
@@ -260,7 +323,7 @@ fn upgrade_command(id: GameId, events: &EventSink, state: &mut WorkerState) {
         .ok_or_else(|| WorkerError::State("official release metadata is not available".into()))
         .and_then(|asset| {
             let release_id = asset.release.id.clone();
-            upgrade_game(&game, asset, |release_state, received, total| {
+            upgrade_game(&game, asset, scope, |release_state, received, total| {
                 progress_events.send(Event::ReleaseProgress {
                     id: release_id.clone(),
                     state: release_state,
@@ -282,12 +345,13 @@ fn profile_command(
         return;
     };
     let progress_events = events.clone();
-    let cached: Vec<_> = state
+    let mut cached: Vec<_> = state
         .catalog
         .releases
         .iter()
         .flat_map(|release| release.dlls.iter().cloned())
         .collect();
+    cached.extend(dlss_core::imported_catalog_dlls(&state.imports));
     let result = latest_asset(&state.assets)
         .ok_or_else(|| WorkerError::State("official release metadata is not available".into()))
         .and_then(|asset| {
@@ -382,6 +446,83 @@ fn add_root_command(root: &std::path::Path, events: &EventSink, state: &mut Work
     scan(events, &state.roots, &mut state.games);
 }
 
+#[cfg(windows)]
+fn load_imports(events: &EventSink) -> dlss_core::ImportIndex {
+    match import_store().and_then(|store| store.load_index().map_err(WorkerError::from)) {
+        Ok(index) => index,
+        Err(error) => {
+            events.send(Event::Warning(format!(
+                "Could not load imported DLLs: {error}"
+            )));
+            dlss_core::ImportIndex::default()
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn load_imports(_events: &EventSink) -> dlss_core::ImportIndex {
+    dlss_core::ImportIndex::default()
+}
+
+fn import_command(path: &std::path::Path, events: &EventSink, state: &mut WorkerState) {
+    let result = import_dll(path);
+    if let Ok(record) = &result {
+        if let Some(existing) = state
+            .imports
+            .records
+            .iter_mut()
+            .find(|existing| existing.sha256 == record.sha256)
+        {
+            existing.clone_from(record);
+        } else {
+            state.imports.records.push(record.clone());
+        }
+    }
+    events.send(Event::ImportFinished(result));
+}
+
+fn remove_import_command(hash: [u8; 32], events: &EventSink, state: &mut WorkerState) {
+    let result = import_store()
+        .and_then(|store| store.remove(hash).map_err(WorkerError::from))
+        .map(|()| hash);
+    if result.is_ok() {
+        state.imports.records.retain(|record| record.sha256 != hash);
+    }
+    events.send(Event::ImportRemoved(result));
+}
+
+#[cfg(windows)]
+fn import_store() -> WorkerResult<dlss_core::ImportStore> {
+    let root = dlss_platform::windows::WindowsKnownDirectories
+        .local_app_data()?
+        .join("DLSS Updater/imports");
+    Ok(dlss_core::ImportStore::new(root))
+}
+
+#[cfg(not(windows))]
+fn import_store() -> WorkerResult<dlss_core::ImportStore> {
+    Err(WorkerError::Unavailable(
+        "NVIDIA-signed DLL import is available only in Windows builds",
+    ))
+}
+
+#[cfg(windows)]
+fn import_dll(path: &std::path::Path) -> WorkerResult<dlss_core::ImportedDllRecord> {
+    Ok(import_store()?.import(
+        path,
+        &dlss_platform::windows::WindowsDllInspector,
+        &dlss_platform::windows::WindowsTrustVerifier,
+        now_unix(),
+    )?)
+}
+
+#[cfg(not(windows))]
+fn import_dll(_path: &std::path::Path) -> WorkerResult<dlss_core::ImportedDllRecord> {
+    Err(WorkerError::Unavailable(
+        "NVIDIA-signed DLL import is available only in Windows builds",
+    ))
+}
+
 fn canonicalize_roots(roots: &mut Vec<PathBuf>) {
     let mut normalized = Vec::with_capacity(roots.len());
     for root in roots.drain(..) {
@@ -395,12 +536,9 @@ fn canonicalize_roots(roots: &mut Vec<PathBuf>) {
 
 fn scan(events: &EventSink, roots: &[PathBuf], games: &mut Vec<GameInstall>) {
     events.send(Event::ScanStarted);
-    let (discovered, warnings) = scan_roots(roots);
-    games.clone_from(&discovered);
-    for warning in warnings {
-        events.send(Event::Warning(warning));
-    }
-    events.send(Event::ScanFinished(Ok(discovered)));
+    let outcome = scan_roots(roots);
+    games.clone_from(&outcome.games);
+    events.send(Event::ScanFinished(Ok(outcome)));
 }
 
 fn refresh_catalog(
@@ -497,46 +635,78 @@ fn latest_asset(assets: &[OfficialAsset]) -> Option<&OfficialAsset> {
         .max_by_key(|asset| (asset.release.published_unix, &asset.release.tag))
 }
 
-fn scan_roots(roots: &[PathBuf]) -> (Vec<GameInstall>, Vec<String>) {
+fn scan_roots(roots: &[PathBuf]) -> dlss_core::DiscoveryOutcome {
     #[cfg(windows)]
     let inspector: Box<dyn DllInspector> = Box::new(dlss_platform::windows::WindowsDllInspector);
     #[cfg(not(windows))]
     let inspector: Box<dyn DllInspector> = Box::new(dlss_platform::PortablePeInspector);
 
     #[cfg(windows)]
-    let (mut games, mut warnings) = match dlss_platform::windows::WindowsGameLocator.discover() {
-        Ok(games) => (games, Vec::new()),
-        Err(error) => (
-            Vec::new(),
-            vec![format!("Automatic game discovery failed: {error}")],
-        ),
+    let mut outcome = match dlss_platform::windows::WindowsGameLocator.discover() {
+        Ok(outcome) => outcome,
+        Err(error) => dlss_core::DiscoveryOutcome {
+            games: Vec::new(),
+            reports: vec![dlss_core::StoreDiscoveryReport {
+                store: "Automatic stores".into(),
+                status: dlss_core::DiscoveryStatus::Error,
+                games_found: 0,
+                detail: Some(error.to_string()),
+            }],
+        },
     };
     #[cfg(not(windows))]
-    let mut games: Vec<GameInstall> = Vec::new();
-    #[cfg(not(windows))]
-    let mut warnings = Vec::new();
+    let mut outcome = dlss_core::DiscoveryOutcome {
+        games: Vec::new(),
+        reports: vec![dlss_core::StoreDiscoveryReport {
+            store: "Automatic stores".into(),
+            status: dlss_core::DiscoveryStatus::NotDetected,
+            games_found: 0,
+            detail: Some("store discovery is available only in Windows builds".into()),
+        }],
+    };
+    let mut manual_errors = Vec::new();
+    let mut manual_found = 0;
     for root in roots {
         let mut game = match dlss_platform::manual_install(root) {
             Ok(game) => game,
             Err(error) => {
-                warnings.push(format!("Could not scan {}: {error}", root.display()));
+                manual_errors.push(format!("{}: {error}", root.display()));
                 continue;
             }
         };
         let inspected = dlss_platform::scan_game(&game.id, &game.root, inspector.as_ref());
         for error in inspected.iter().filter_map(|result| result.as_ref().err()) {
-            warnings.push(format!("{}: {error}", game.name));
+            manual_errors.push(format!("{}: {error}", game.name));
         }
         game.inspection_errors = inspected.iter().filter(|result| result.is_err()).count();
         game.dlls = inspected.into_iter().filter_map(Result::ok).collect();
-        if let Some(existing) = games.iter_mut().find(|existing| existing.id == game.id) {
+        manual_found += 1;
+        if let Some(existing) = outcome
+            .games
+            .iter_mut()
+            .find(|existing| existing.id == game.id)
+        {
             *existing = game;
         } else {
-            games.push(game);
+            outcome.games.push(game);
         }
     }
-    games.sort_by_key(|game| game.name.to_lowercase());
-    (games, warnings)
+    outcome.reports.push(dlss_core::StoreDiscoveryReport {
+        store: "Manual".into(),
+        status: if manual_errors.is_empty() {
+            if manual_found > 0 {
+                dlss_core::DiscoveryStatus::Found
+            } else {
+                dlss_core::DiscoveryStatus::NotDetected
+            }
+        } else {
+            dlss_core::DiscoveryStatus::Error
+        },
+        games_found: manual_found,
+        detail: (!manual_errors.is_empty()).then(|| manual_errors.join("; ")),
+    });
+    outcome.games.sort_by_key(|game| game.name.to_lowercase());
+    outcome
 }
 
 #[cfg(windows)]
@@ -579,10 +749,18 @@ fn inspect_release(
 fn upgrade_game(
     game: &GameInstall,
     asset: &OfficialAsset,
+    scope: UpgradeScope,
     progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<UpgradeReport> {
     let (base, catalog_dlls) = prepare_release(asset, progress)?;
-    let plan = dlss_core::plan_strict_upgrades(operation_nonce(), &game.dlls, &catalog_dlls);
+    let plan = match scope {
+        UpgradeScope::AllManaged => {
+            dlss_core::plan_strict_upgrades(operation_nonce(), &game.dlls, &catalog_dlls)
+        }
+        UpgradeScope::DlssOnly => {
+            dlss_core::plan_dlss_only_upgrades(operation_nonce(), &game.dlls, &catalog_dlls)
+        }
+    };
     Ok(execute_game_plan(game, asset, &base, &plan))
 }
 
@@ -917,6 +1095,7 @@ fn undo_game(_game: &GameInstall, plan: &dlss_core::OperationPlan) -> WorkerResu
 fn upgrade_game(
     _game: &GameInstall,
     _asset: &OfficialAsset,
+    _scope: UpgradeScope,
     _progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<UpgradeReport> {
     Err(WorkerError::Unavailable(
@@ -1067,5 +1246,21 @@ mod tests {
         let mut roots = vec![child.clone(), alias];
         canonicalize_roots(&mut roots);
         assert_eq!(roots, vec![child.canonicalize().unwrap()]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn manual_scan_failures_are_reported() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let outcome = scan_roots(&[missing]);
+        let report = outcome
+            .reports
+            .iter()
+            .find(|report| report.store == "Manual")
+            .unwrap();
+        assert_eq!(report.status, dlss_core::DiscoveryStatus::Error);
+        assert_eq!(report.games_found, 0);
+        assert!(report.detail.is_some());
     }
 }

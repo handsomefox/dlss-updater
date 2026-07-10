@@ -1,6 +1,6 @@
 use crate::{
-    DllMetadata, GameInstall, SignatureStatus, SystemToolDefinition, SystemToolId, SystemToolState,
-    ToolChangePlan, ToolChangeResult, ToolRestorePoint,
+    DiscoveryOutcome, DllMetadata, SignatureStatus, SystemToolDefinition, SystemToolId,
+    SystemToolState, ToolChangePlan, ToolChangeResult, ToolRestorePoint,
 };
 use std::path::{Path, PathBuf};
 
@@ -51,7 +51,7 @@ pub trait GameLocator: Send + Sync {
     ///
     /// # Errors
     /// Returns an error when a platform discovery source cannot be queried.
-    fn discover(&self) -> Result<Vec<GameInstall>, CoreError>;
+    fn discover(&self) -> Result<DiscoveryOutcome, CoreError>;
 }
 pub trait DllInspector: Send + Sync {
     /// Reads trusted metadata from a DLL candidate.
@@ -66,6 +66,14 @@ pub trait TrustVerifier: Send + Sync {
     /// # Errors
     /// Returns an error when trust evaluation cannot be completed.
     fn verify(&self, path: &Path) -> Result<SignatureStatus, CoreError>;
+
+    /// Returns the verified leaf signer's simple display name when available.
+    ///
+    /// # Errors
+    /// Returns an error when signer extraction cannot be completed.
+    fn signer_subject(&self, _path: &Path) -> Result<Option<String>, CoreError> {
+        Ok(None)
+    }
 }
 pub trait KnownDirectories: Send + Sync {
     /// Returns the per-user application-data directory.

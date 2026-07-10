@@ -2,13 +2,13 @@
 //! elevated plans can select only the allowlisted tool ID.
 
 use dlss_core::{
-    AtomicFileReplacer, BackupStore, BatchResult, CoreError, DLSS_INDICATOR_TOOL_ID, DllInspector,
-    DllMetadata, DllVersion, ElevatedFilePlan, ElevatedHelperPlan, GameId, GameInstall,
-    GameLocator, KnownDirectories, PlatformCapabilities, PrivilegeBroker, RegistryValueSnapshot,
-    RegistryView, SignatureStatus, StoreKind, SystemToolDefinition, SystemToolId,
-    SystemToolProvider, SystemToolScope, SystemToolState, ToolChangePlan, ToolChangeResult,
-    ToolRestorePoint, TrustVerifier, execute_plan, hash_file, indicator_state, now_unix,
-    read_versioned_json, write_versioned_json,
+    AtomicFileReplacer, BackupStore, BatchResult, CoreError, DLSS_INDICATOR_TOOL_ID,
+    DiscoveryOutcome, DiscoveryStatus, DllInspector, DllMetadata, DllVersion, ElevatedFilePlan,
+    ElevatedHelperPlan, GameId, GameInstall, GameLocator, KnownDirectories, PlatformCapabilities,
+    PrivilegeBroker, RegistryValueSnapshot, RegistryView, SignatureStatus, StoreDiscoveryReport,
+    StoreKind, SystemToolDefinition, SystemToolId, SystemToolProvider, SystemToolScope,
+    SystemToolState, ToolChangePlan, ToolChangeResult, ToolRestorePoint, TrustVerifier,
+    execute_plan, hash_file, indicator_state, now_unix, read_versioned_json, write_versioned_json,
 };
 use object::Object;
 use sha2::{Digest, Sha256};
@@ -22,10 +22,12 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{CloseHandle, HANDLE, HWND, TRUST_E_NOSIGNATURE, WAIT_FAILED},
+        Security::Cryptography::{CERT_NAME_SIMPLE_DISPLAY_TYPE, CertGetNameStringW},
         Security::WinTrust::{
             WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
             WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
-            WTD_UI_NONE, WinVerifyTrust,
+            WTD_UI_NONE, WTHelperGetProvCertFromChain, WTHelperGetProvSignerFromChain,
+            WTHelperProvDataFromStateData, WinVerifyTrust,
         },
         Storage::FileSystem::{
             GetFileVersionInfoSizeW, GetFileVersionInfoW, REPLACE_FILE_FLAGS, ReplaceFileW,
@@ -48,6 +50,7 @@ use windows_registry::{CURRENT_USER, LOCAL_MACHINE, Type};
 const NGX_KEY: &str = r"SOFTWARE\NVIDIA Corporation\Global\NGXCore";
 const INDICATOR_VALUE: &str = "ShowDlssIndicator";
 const KEY_WOW64_64KEY: u32 = 0x0100;
+const KEY_WOW64_32KEY: u32 = 0x0200;
 
 #[must_use]
 pub fn capabilities() -> PlatformCapabilities {
@@ -113,16 +116,42 @@ impl DllInspector for WindowsDllInspector {
 
 pub struct WindowsGameLocator;
 
+struct StoreScan {
+    games: Vec<GameInstall>,
+    empty_status: DiscoveryStatus,
+    detail: Option<String>,
+}
+
+impl StoreScan {
+    fn report(&self, store: &str) -> StoreDiscoveryReport {
+        StoreDiscoveryReport {
+            store: store.into(),
+            status: if self.games.is_empty() {
+                self.empty_status
+            } else {
+                DiscoveryStatus::Found
+            },
+            games_found: self.games.len(),
+            detail: self.detail.clone(),
+        }
+    }
+}
+
 impl GameLocator for WindowsGameLocator {
-    fn discover(&self) -> Result<Vec<GameInstall>, CoreError> {
+    fn discover(&self) -> Result<DiscoveryOutcome, CoreError> {
         let inspector = WindowsDllInspector;
+        let steam = discover_steam();
+        let epic = discover_epic();
+        let gog = discover_gog();
+        let reports = vec![
+            steam.report("Steam"),
+            epic.report("Epic"),
+            gog.report("GOG"),
+        ];
         let mut games = Vec::new();
-        games.extend(discover_steam());
-        let epic_directory = WindowsKnownDirectories
-            .program_data()?
-            .join(r"Epic\EpicGamesLauncher\Data\Manifests");
-        games.extend(crate::epic_manifests(&epic_directory));
-        games.extend(discover_gog());
+        games.extend(steam.games);
+        games.extend(epic.games);
+        games.extend(gog.games);
         for game in &mut games {
             let inspected = crate::scan_game(&game.id, &game.root, &inspector);
             game.inspection_errors = inspected.iter().filter(|result| result.is_err()).count();
@@ -130,29 +159,76 @@ impl GameLocator for WindowsGameLocator {
         }
         games.sort_by_key(|game| game.name.to_lowercase());
         games.dedup_by(|right, left| right.id == left.id);
-        Ok(games)
+        for report in &reports {
+            tracing::info!(store = %report.store, status = ?report.status, games = report.games_found, detail = ?report.detail, "store discovery completed");
+        }
+        Ok(DiscoveryOutcome { games, reports })
     }
 }
 
-fn discover_steam() -> Vec<GameInstall> {
-    let Ok(key) = CURRENT_USER.open(r"Software\Valve\Steam") else {
-        return Vec::new();
+fn discover_steam() -> StoreScan {
+    let mut registry_errors = Vec::new();
+    let steam_path = match CURRENT_USER
+        .open(r"Software\Valve\Steam")
+        .and_then(|key| key.get_string("SteamPath"))
+    {
+        Ok(path) => {
+            tracing::info!(hive = "HKCU", "Steam registry path found");
+            Ok(path)
+        }
+        Err(error) => {
+            tracing::info!(hive = "HKCU", %error, "Steam registry path not found");
+            if !is_missing_registry_error(error.code().0) {
+                registry_errors.push(format!("HKCU: {error}"));
+            }
+            let fallback = LOCAL_MACHINE
+                .options()
+                .read()
+                .access(KEY_WOW64_32KEY)
+                .open(r"SOFTWARE\Valve\Steam")
+                .and_then(|key| key.get_string("InstallPath"))
+                .inspect(|_| tracing::info!(hive = "HKLM", "Steam registry path found"))
+                .inspect_err(|error| {
+                    tracing::info!(hive = "HKLM", %error, "Steam registry path not found");
+                });
+            if let Err(error) = &fallback
+                && !is_missing_registry_error(error.code().0)
+            {
+                registry_errors.push(format!("HKLM: {error}"));
+            }
+            fallback
+        }
     };
-    let Ok(steam_path) = key.get_string("SteamPath") else {
-        return Vec::new();
+    let Ok(steam_path) = steam_path else {
+        tracing::warn!("Steam registry key missing in HKCU and HKLM");
+        let had_errors = !registry_errors.is_empty();
+        return StoreScan {
+            games: Vec::new(),
+            empty_status: if had_errors {
+                DiscoveryStatus::Error
+            } else {
+                DiscoveryStatus::NotDetected
+            },
+            detail: Some(if had_errors {
+                registry_errors.join("; ")
+            } else {
+                "registry key missing (HKCU and HKLM)".into()
+            }),
+        };
     };
-    let primary = PathBuf::from(steam_path).join("steamapps");
-    let mut steamapps = vec![primary.clone()];
-    if let Ok(contents) = fs::read_to_string(primary.join("libraryfolders.vdf")) {
-        steamapps.extend(
-            crate::steam_library_paths(&contents)
-                .into_iter()
-                .map(|path| path.join("steamapps")),
-        );
-    }
+    let steam_root = PathBuf::from(steam_path);
+    tracing::info!(path = %steam_root.display(), "Steam root resolved");
+    let (steamapps, detail) = crate::steam_steamapps_dirs(&steam_root);
     let mut games = Vec::new();
-    for library in crate::deduplicate_roots(steamapps) {
-        for (app_id, name, root) in crate::steam_manifests(&library) {
+    let mut errors = Vec::new();
+    for library in steamapps {
+        let manifests = crate::discovery::steam_manifests_with_errors(&library);
+        tracing::info!(path = %library.display(), manifests = manifests.items.len(), errors = manifests.errors.len(), "Steam library scanned");
+        for error in &manifests.errors {
+            tracing::warn!(%error, "Steam manifest could not be read");
+        }
+        errors.extend(manifests.errors);
+        for (app_id, name, root) in manifests.items {
             let id = GameId(format!("steam:{app_id}"));
             games.push(GameInstall {
                 id,
@@ -164,29 +240,104 @@ fn discover_steam() -> Vec<GameInstall> {
             });
         }
     }
-    games
+    if let Some(detail) = detail {
+        errors.push(detail);
+    }
+    let detail = (!errors.is_empty()).then(|| errors.join("; "));
+    StoreScan {
+        games,
+        empty_status: if detail.is_some() {
+            DiscoveryStatus::Error
+        } else {
+            DiscoveryStatus::NotDetected
+        },
+        detail,
+    }
 }
 
-fn discover_gog() -> Vec<GameInstall> {
+fn discover_epic() -> StoreScan {
+    let directory = match WindowsKnownDirectories.program_data() {
+        Ok(root) => root.join(r"Epic\EpicGamesLauncher\Data\Manifests"),
+        Err(error) => {
+            tracing::warn!(%error, "Epic ProgramData directory could not be resolved");
+            return StoreScan {
+                games: Vec::new(),
+                empty_status: DiscoveryStatus::Error,
+                detail: Some(error.to_string()),
+            };
+        }
+    };
+    if !directory.exists() {
+        tracing::info!(path = %directory.display(), "Epic manifest directory not found");
+        return StoreScan {
+            games: Vec::new(),
+            empty_status: DiscoveryStatus::NotDetected,
+            detail: Some(format!(
+                "manifest directory not found: {}",
+                directory.display()
+            )),
+        };
+    }
+    let scan = crate::discovery::epic_manifests_with_errors(&directory);
+    for error in &scan.errors {
+        tracing::warn!(%error, "Epic manifest could not be read");
+    }
+    StoreScan {
+        games: scan.items,
+        empty_status: if scan.errors.is_empty() {
+            DiscoveryStatus::NotDetected
+        } else {
+            DiscoveryStatus::Error
+        },
+        detail: (!scan.errors.is_empty()).then(|| scan.errors.join("; ")),
+    }
+}
+
+fn discover_gog() -> StoreScan {
     const GOG_GAMES: &str = r"SOFTWARE\GOG.com\Games";
-    const KEY_WOW64_32KEY: u32 = 0x0200;
     let mut games = Vec::new();
-    for (view, _kind) in [
+    let mut errors = Vec::new();
+    let mut found_registry = false;
+    for (view, kind) in [
         (KEY_WOW64_64KEY, RegistryView::View64),
         (KEY_WOW64_32KEY, RegistryView::View32),
     ] {
-        let Ok(parent) = LOCAL_MACHINE.options().read().access(view).open(GOG_GAMES) else {
-            continue;
+        let parent = match LOCAL_MACHINE.options().read().access(view).open(GOG_GAMES) {
+            Ok(parent) => {
+                found_registry = true;
+                tracing::info!(?kind, "GOG registry view found");
+                parent
+            }
+            Err(error) => {
+                tracing::info!(?kind, %error, "GOG registry view not found");
+                if !is_missing_registry_error(error.code().0) {
+                    errors.push(format!("{kind:?}: {error}"));
+                }
+                continue;
+            }
         };
-        let Ok(keys) = parent.keys() else {
-            continue;
+        let keys = match parent.keys() {
+            Ok(keys) => keys,
+            Err(error) => {
+                tracing::warn!(?kind, %error, "GOG registry games could not be enumerated");
+                errors.push(format!("{kind:?}: {error}"));
+                continue;
+            }
         };
         for key_name in keys {
-            let Ok(key) = parent.open(&key_name) else {
-                continue;
+            let key = match parent.open(&key_name) {
+                Ok(key) => key,
+                Err(error) => {
+                    errors.push(format!("{kind:?}/{key_name}: {error}"));
+                    continue;
+                }
             };
-            let Ok(path) = key.get_string("path") else {
-                continue;
+            let path = match key.get_string("path") {
+                Ok(path) => path,
+                Err(error) => {
+                    errors.push(format!("{kind:?}/{key_name}/path: {error}"));
+                    continue;
+                }
             };
             let id = key
                 .get_string("gameID")
@@ -204,7 +355,28 @@ fn discover_gog() -> Vec<GameInstall> {
             });
         }
     }
-    games
+    let detail = if !errors.is_empty() {
+        Some(errors.join("; "))
+    } else if !found_registry {
+        Some("registry key missing in 32-bit and 64-bit views".into())
+    } else {
+        None
+    };
+    StoreScan {
+        games,
+        empty_status: if errors.is_empty() {
+            DiscoveryStatus::NotDetected
+        } else {
+            DiscoveryStatus::Error
+        },
+        detail,
+    }
+}
+
+fn is_missing_registry_error(code: i32) -> bool {
+    const FILE_NOT_FOUND: i32 = 0x8007_0002u32.cast_signed();
+    const PATH_NOT_FOUND: i32 = 0x8007_0003u32.cast_signed();
+    matches!(code, FILE_NOT_FOUND | PATH_NOT_FOUND)
 }
 
 fn file_version(path: &Path) -> Result<Option<DllVersion>, CoreError> {
@@ -250,6 +422,16 @@ pub struct WindowsTrustVerifier;
 
 impl TrustVerifier for WindowsTrustVerifier {
     fn verify(&self, path: &Path) -> Result<SignatureStatus, CoreError> {
+        Self::verify_with_signer(path).map(|result| result.0)
+    }
+
+    fn signer_subject(&self, path: &Path) -> Result<Option<String>, CoreError> {
+        Self::verify_with_signer(path).map(|result| result.1)
+    }
+}
+
+impl WindowsTrustVerifier {
+    fn verify_with_signer(path: &Path) -> Result<(SignatureStatus, Option<String>), CoreError> {
         let path = wide(path);
         let file_size = u32::try_from(size_of::<WINTRUST_FILE_INFO>())
             .map_err(|_| CoreError::Validation("trust file structure is too large".into()))?;
@@ -275,20 +457,67 @@ impl TrustVerifier for WindowsTrustVerifier {
         let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
         // SAFETY: structures and path storage remain alive for both calls. Provider
         // state is always closed after verification, including failed verification.
-        let status = unsafe {
+        let (status, signer) = unsafe {
             let status = WinVerifyTrust(HWND::default(), &raw mut action, (&raw mut data).cast());
+            let signer = if status == 0 {
+                signer_subject_from_state(data.hWVTStateData)
+            } else {
+                None
+            };
             data.dwStateAction = WTD_STATEACTION_CLOSE;
             let _ = WinVerifyTrust(HWND::default(), &raw mut action, (&raw mut data).cast());
-            status
+            (status, signer)
         };
-        Ok(if status == 0 {
+        let signature = if status == 0 {
             SignatureStatus::Trusted
         } else if status == TRUST_E_NOSIGNATURE.0 {
             SignatureStatus::Unsigned
         } else {
             SignatureStatus::Untrusted
-        })
+        };
+        Ok((signature, signer))
     }
+}
+
+unsafe fn signer_subject_from_state(state: HANDLE) -> Option<String> {
+    // SAFETY: the successful WinVerifyTrust provider state remains open until
+    // this function returns.
+    let provider = unsafe { WTHelperProvDataFromStateData(state) };
+    if provider.is_null() {
+        return None;
+    }
+    let signer = unsafe { WTHelperGetProvSignerFromChain(provider, 0, false, 0) };
+    if signer.is_null() {
+        return None;
+    }
+    let certificate = unsafe { WTHelperGetProvCertFromChain(signer, 0) };
+    if certificate.is_null() {
+        return None;
+    }
+    let context = unsafe { (*certificate).pCert };
+    if context.is_null() {
+        return None;
+    }
+    let length =
+        unsafe { CertGetNameStringW(context, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, None, None) };
+    if length <= 1 {
+        return None;
+    }
+    let mut buffer = vec![0_u16; usize::try_from(length).ok()?];
+    let written = unsafe {
+        CertGetNameStringW(
+            context,
+            CERT_NAME_SIMPLE_DISPLAY_TYPE,
+            0,
+            None,
+            Some(&mut buffer),
+        )
+    };
+    if written <= 1 {
+        return None;
+    }
+    buffer.truncate(usize::try_from(written - 1).ok()?);
+    String::from_utf16(&buffer).ok()
 }
 
 pub struct WindowsKnownDirectories;
@@ -687,9 +916,13 @@ fn validate_helper_paths(
 
 fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<(), CoreError> {
     let game_root = plan.game_root.canonicalize()?;
-    let known_game = WindowsGameLocator.discover()?.into_iter().any(|game| {
-        game.id == plan.game_id && game.root.canonicalize().ok() == Some(game_root.clone())
-    });
+    let known_game = WindowsGameLocator
+        .discover()?
+        .games
+        .into_iter()
+        .any(|game| {
+            game.id == plan.game_id && game.root.canonicalize().ok() == Some(game_root.clone())
+        });
     let known_manual = plan.game_id.0.starts_with("manual:")
         && crate::manual_install(&game_root).is_ok_and(|game| game.id == plan.game_id);
     if !known_game && !known_manual {
@@ -700,6 +933,8 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<(), CoreEr
     let releases = base.join("cache/releases").canonicalize()?;
     let backups = base.join("backups/objects");
     let backups = backups.canonicalize().ok();
+    let imports = base.join("imports/objects");
+    let imports = imports.canonicalize().ok();
     for swap in &plan.operation.swaps {
         let target = swap.target_path.canonicalize()?;
         if !target.starts_with(&game_root) {
@@ -708,14 +943,42 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<(), CoreEr
             ));
         }
         let source = swap.source_path.canonicalize()?;
+        let imported_source = imports
+            .as_ref()
+            .is_some_and(|root| source.starts_with(root));
         let trusted_source = source.starts_with(&releases)
             || backups
                 .as_ref()
-                .is_some_and(|root| source.starts_with(root));
+                .is_some_and(|root| source.starts_with(root))
+            || imported_source;
         if !trusted_source || hash_file(&source)? != swap.source_sha256 {
             return Err(CoreError::Validation(
                 "source is outside the validated cache".into(),
             ));
+        }
+        if imported_source {
+            if swap
+                .target_path
+                .file_name()
+                .and_then(dlss_core::DllKind::classify)
+                .is_none()
+            {
+                return Err(CoreError::Validation(
+                    "import target is not a managed DLL".into(),
+                ));
+            }
+            let metadata = WindowsDllInspector.inspect(&source)?;
+            let verifier = WindowsTrustVerifier;
+            let signer = verifier.signer_subject(&source)?;
+            if !metadata.x86_64
+                || metadata.version.is_none()
+                || verifier.verify(&source)? != SignatureStatus::Trusted
+                || !signer.as_deref().is_some_and(dlss_core::is_nvidia_signer)
+            {
+                return Err(CoreError::Validation(
+                    "imported source failed elevated trust validation".into(),
+                ));
+            }
         }
     }
     Ok(())

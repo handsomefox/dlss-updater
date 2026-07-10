@@ -29,6 +29,7 @@ thiserror.workspace = true
 embed-resource = "3.0.11"
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile = "3.27.0"
 
 # Referenced by build.rs; cargo-machete does not inspect build-script source.

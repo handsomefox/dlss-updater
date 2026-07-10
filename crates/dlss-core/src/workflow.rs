@@ -21,12 +21,33 @@ pub fn plan_strict_upgrades(
     installed: &[DllInstallation],
     latest: &[CatalogDll],
 ) -> OperationPlan {
+    plan_filtered_upgrades(nonce, installed, latest, |_| true)
+}
+
+#[must_use]
+pub fn plan_dlss_only_upgrades(
+    nonce: impl Into<String>,
+    installed: &[DllInstallation],
+    latest: &[CatalogDll],
+) -> OperationPlan {
+    plan_filtered_upgrades(nonce, installed, latest, |dll| {
+        crate::DllKind::classify(&dll.file_name).is_some_and(crate::DllKind::is_dlss_family)
+    })
+}
+
+fn plan_filtered_upgrades(
+    nonce: impl Into<String>,
+    installed: &[DllInstallation],
+    latest: &[CatalogDll],
+    include: impl Fn(&DllInstallation) -> bool,
+) -> OperationPlan {
     let latest_by_name: HashMap<_, _> = latest
         .iter()
         .filter_map(|dll| fold_file_name(&dll.file_name).map(|name| (name, dll)))
         .collect();
     let swaps = installed
         .iter()
+        .filter(|current| include(current))
         .filter_map(|current| {
             let name = fold_file_name(&current.file_name)?;
             let target = latest_by_name.get(&name)?;
@@ -46,6 +67,18 @@ pub fn plan_strict_upgrades(
         nonce: nonce.into(),
         swaps,
     }
+}
+
+#[must_use]
+pub fn plan_touches_streamline(plans: &[OperationPlan]) -> bool {
+    plans.iter().any(|plan| {
+        plan.swaps.iter().any(|swap| {
+            swap.target_path
+                .file_name()
+                .and_then(crate::DllKind::classify)
+                == Some(crate::DllKind::Streamline)
+        })
+    })
 }
 
 /// Resolves an advanced per-installation profile into immutable file swaps.
@@ -313,7 +346,11 @@ pub fn hash_file(path: &Path) -> Result<[u8; 32], CoreError> {
     Ok(hasher.finalize().into())
 }
 
-fn copy_flush_hash(source: &Path, destination: &Path, expected: [u8; 32]) -> Result<(), CoreError> {
+pub(crate) fn copy_flush_hash(
+    source: &Path,
+    destination: &Path,
+    expected: [u8; 32],
+) -> Result<(), CoreError> {
     let mut input = File::open(source)?;
     let mut output = OpenOptions::new()
         .write(true)
@@ -490,6 +527,46 @@ mod tests {
         );
         assert_eq!(plan.swaps.len(), 1);
         assert_eq!(plan.swaps[0].comparison, Comparison::Upgrade);
+    }
+
+    #[test]
+    fn dlss_only_planner_skips_streamline_and_reflex() {
+        let dir = tempdir().unwrap();
+        let names = [
+            "nvngx_dlss.dll",
+            "nvngx_dlssg.dll",
+            "sl.common.dll",
+            "nvlowlatencyvk.dll",
+        ];
+        let mut installed = Vec::new();
+        let mut latest = Vec::new();
+        for name in names {
+            let current = dir.path().join(name);
+            let source = dir.path().join(format!("new-{name}"));
+            fs::write(&current, b"old").unwrap();
+            fs::write(&source, name.as_bytes()).unwrap();
+            installed.push(installation(current, Some(DllVersion::new(1, 0, 0, 0))));
+            latest.push(CatalogDll {
+                file_name: name.into(),
+                version: DllVersion::new(2, 0, 0, 0),
+                sha256: hash_file(&source).unwrap(),
+                source,
+                release: ReleaseId("r".into()),
+            });
+        }
+        let plan = plan_dlss_only_upgrades("n", &installed, &latest);
+        assert_eq!(plan.swaps.len(), 2);
+        assert!(plan.swaps.iter().all(|swap| {
+            swap.target_path
+                .file_name()
+                .and_then(crate::DllKind::classify)
+                .is_some_and(crate::DllKind::is_dlss_family)
+        }));
+        let all = plan_strict_upgrades("n", &installed, &latest);
+        assert!(plan_touches_streamline(&[all]));
+        assert!(!plan_touches_streamline(&[plan]));
+        let streamline_only = plan_dlss_only_upgrades("n", &installed[2..], &latest[2..]);
+        assert!(streamline_only.swaps.is_empty());
     }
 
     #[test]

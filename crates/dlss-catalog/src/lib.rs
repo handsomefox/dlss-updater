@@ -55,6 +55,10 @@ impl CatalogCacheIndex {
             self.releases.push(release);
         }
     }
+
+    pub fn remove_release(&mut self, id: &ReleaseId) {
+        self.releases.retain(|release| &release.metadata.id != id);
+    }
 }
 
 pub const MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -190,7 +194,10 @@ fn extract_to_staging(
             return Err(CatalogError::TooLarge);
         }
         let output = destination.join(parts[2]);
-        let temporary = output.with_extension("dll.partial");
+        // Keep the final `.dll` extension: Windows Authenticode provider
+        // selection can reject an otherwise valid PE when staged as
+        // `*.dll.partial`.
+        let temporary = destination.join(format!(".partial-{}", parts[2]));
         let mut file = File::create(&temporary)?;
         let mut hasher = Sha256::new();
         let mut buffer = vec![0_u8; 64 * 1024];
@@ -223,7 +230,11 @@ fn extract_to_staging(
             != SignatureStatus::Trusted
         {
             let _ = fs::remove_file(&temporary);
-            return Err(CatalogError::Untrusted(parts[2].into()));
+            tracing::warn!(
+                dll = parts[2],
+                "skipping production DLL with an untrusted signature"
+            );
+            continue;
         }
         let Some(version) = metadata.version else {
             let _ = fs::remove_file(&temporary);
@@ -289,6 +300,33 @@ mod tests {
             } else {
                 SignatureStatus::Untrusted
             })
+        }
+    }
+
+    struct TrustByContents;
+    impl TrustVerifier for TrustByContents {
+        fn verify(&self, path: &Path) -> Result<SignatureStatus, CoreError> {
+            Ok(if fs::read(path)? == b"untrusted" {
+                SignatureStatus::Untrusted
+            } else {
+                SignatureStatus::Trusted
+            })
+        }
+    }
+
+    struct TrustRequiresDllExtension;
+    impl TrustVerifier for TrustRequiresDllExtension {
+        fn verify(&self, path: &Path) -> Result<SignatureStatus, CoreError> {
+            Ok(
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
+                {
+                    SignatureStatus::Trusted
+                } else {
+                    SignatureStatus::Untrusted
+                },
+            )
         }
     }
 
@@ -382,7 +420,7 @@ mod tests {
             &Inspector,
             &Trust(false),
         );
-        assert!(matches!(untrusted, Err(CatalogError::Untrusted(_))));
+        assert!(matches!(untrusted, Err(CatalogError::NoProductionDlls)));
 
         let (directory, path) = archive(&[("bin/x64/sl.common.dll", b"x86-binary")]);
         let wrong_arch = validate_and_extract(
@@ -393,6 +431,42 @@ mod tests {
             &Trust(true),
         );
         assert!(matches!(wrong_arch, Err(CatalogError::InvalidPe(_))));
+    }
+
+    #[test]
+    fn skips_untrusted_candidate_when_trusted_dlls_remain() {
+        let (directory, path) = archive(&[
+            ("bin/x64/NvLowLatencyVk.dll", b"untrusted"),
+            ("bin/x64/nvngx_dlss.dll", b"trusted"),
+        ]);
+        let output = directory.path().join("output");
+        let dlls = validate_and_extract(
+            &path,
+            &output,
+            &ReleaseId("r".into()),
+            &Inspector,
+            &TrustByContents,
+        )
+        .unwrap();
+        assert_eq!(dlls.len(), 1);
+        assert_eq!(dlls[0].file_name, "nvngx_dlss.dll");
+        assert!(!output.join("NvLowLatencyVk.dll").exists());
+    }
+
+    #[test]
+    fn authenticode_validation_keeps_dll_extension_during_staging() {
+        let (directory, path) = archive(&[("bin/x64/nvngx_dlss.dll", b"trusted")]);
+        let output = directory.path().join("output");
+        let dlls = validate_and_extract(
+            &path,
+            &output,
+            &ReleaseId("r".into()),
+            &Inspector,
+            &TrustRequiresDllExtension,
+        )
+        .unwrap();
+        assert_eq!(dlls.len(), 1);
+        assert!(output.join("nvngx_dlss.dll").exists());
     }
 
     #[test]

@@ -7,4 +7,5 @@ pub(crate) struct PersistedState {
     pub target_profile: dlss_core::TargetProfile,
     pub tool_restore_points: Vec<dlss_core::ToolRestorePoint>,
     pub activity: Vec<dlss_core::ActivityRecord>,
+    pub disclaimer_acknowledged: bool,
 }

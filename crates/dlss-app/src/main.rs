@@ -12,7 +12,7 @@ use eframe::egui;
 use state::PersistedState;
 use std::time::{Duration, Instant};
 use ui::{
-    inspector::desired_label,
+    inspector::{comparison_label, desired_label, signature_label},
     windows::{format_timestamp, progress_label, state_label},
 };
 #[cfg(windows)]
@@ -64,6 +64,7 @@ fn elevated_helper() {
 struct DlssApp {
     persisted: PersistedState,
     games: Vec<GameRow>,
+    discovery_reports: Vec<dlss_core::StoreDiscoveryReport>,
     filter: String,
     filter_mode: GameFilter,
     game_sort: GameSort,
@@ -80,6 +81,8 @@ struct DlssApp {
     catalog_release: Option<String>,
     catalog_error: Option<String>,
     releases: Vec<dlss_core::CachedRelease>,
+    release_errors: std::collections::HashMap<dlss_core::ReleaseId, String>,
+    imports: Vec<dlss_core::ImportedDllRecord>,
     backups: Vec<dlss_core::BackupRecord>,
     inspecting_release: Option<dlss_core::ReleaseId>,
     upgrading: Option<dlss_core::GameId>,
@@ -124,11 +127,20 @@ enum GameFilter {
     Recent,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum GameSort {
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SortKey {
     Name,
-    DllsAscending,
-    DllsDescending,
+    Store,
+    Dlls,
+    DlssVersion,
+    Upgrades,
+    State,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct GameSort {
+    key: SortKey,
+    ascending: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -142,6 +154,7 @@ enum StoreFilter {
 
 enum ReviewKind {
     BulkLatest(Vec<dlss_core::GameId>),
+    QuickDlss(Vec<dlss_core::GameId>),
     Profiles(Vec<dlss_core::GameId>),
 }
 
@@ -150,7 +163,11 @@ struct GameRow {
     selected: bool,
     name: String,
     store: &'static str,
+    store_kind: dlss_core::StoreKind,
+    root: std::path::PathBuf,
     dlls: usize,
+    dlss_version: Option<dlss_core::DllVersion>,
+    dlss_upgrades: usize,
     upgrades: usize,
     state: String,
     last_operation: String,
@@ -163,17 +180,31 @@ impl GameRow {
         let dll_count = game.dlls.len();
         let inspection_errors = game.inspection_errors;
         let has_unknown = game.dlls.iter().any(|dll| dll.metadata.version.is_none());
+        let dlss_version = game
+            .dlls
+            .iter()
+            .filter(|dll| {
+                dlss_core::DllKind::classify(&dll.file_name)
+                    == Some(dlss_core::DllKind::DlssSuperResolution)
+            })
+            .filter_map(|dll| dll.metadata.version)
+            .max();
+        let store_kind = game.store;
         Self {
             id: game.id,
             selected: false,
             name: game.name,
-            store: match game.store {
+            store: match store_kind {
                 dlss_core::StoreKind::Steam => "Steam",
                 dlss_core::StoreKind::Epic => "Epic",
                 dlss_core::StoreKind::Gog => "GOG",
                 dlss_core::StoreKind::Manual => "Manual",
             },
+            store_kind,
+            root: game.root,
             dlls: dll_count,
+            dlss_version,
+            dlss_upgrades: 0,
             upgrades: 0,
             state: if inspection_errors > 0 {
                 format!("Error ({inspection_errors})")
@@ -198,6 +229,7 @@ impl DlssApp {
                 style.spacing.item_spacing = egui::vec2(8.0, 6.0);
                 style.spacing.button_padding = egui::vec2(10.0, 5.0);
                 style.spacing.interact_size.y = 28.0;
+                style.interaction.selectable_labels = false;
             });
         }
         let mut persisted: PersistedState = cc
@@ -234,9 +266,13 @@ impl DlssApp {
         let app = Self {
             persisted,
             games: Vec::new(),
+            discovery_reports: Vec::new(),
             filter: String::new(),
             filter_mode: GameFilter::All,
-            game_sort: GameSort::Name,
+            game_sort: GameSort {
+                key: SortKey::Name,
+                ascending: true,
+            },
             store_filter: StoreFilter::All,
             selected: None,
             selected_dlls: std::collections::HashSet::new(),
@@ -256,6 +292,8 @@ impl DlssApp {
             catalog_release: None,
             catalog_error: None,
             releases: Vec::new(),
+            release_errors: std::collections::HashMap::new(),
+            imports: Vec::new(),
             backups,
             inspecting_release: None,
             upgrading: None,
@@ -275,14 +313,12 @@ impl DlssApp {
 
     fn game_table(&mut self, ui: &mut egui::Ui) {
         let rows = self.filtered_game_rows();
-        let (requested_sort, requested_upgrade) = self.render_game_rows(ui, &rows);
+        let (requested_sort, requested_review) = self.render_game_rows(ui, &rows);
         if let Some(sort) = requested_sort {
             self.game_sort = sort;
         }
-        if let Some(game_id) = requested_upgrade {
-            self.upgrading = Some(game_id.clone());
-            self.toast = Some("Preparing official release…".into());
-            let _ = self.worker.commands.send(Command::UpgradeLatest(game_id));
+        if requested_review.is_some() {
+            self.review = requested_review;
         }
         self.render_game_empty_state(ui, rows.is_empty());
     }
@@ -306,10 +342,10 @@ impl DlssApp {
             || game.store.to_ascii_lowercase().contains(filter);
         let store_matches = match self.store_filter {
             StoreFilter::All => true,
-            StoreFilter::Steam => game.store == "Steam",
-            StoreFilter::Epic => game.store == "Epic",
-            StoreFilter::Gog => game.store == "GOG",
-            StoreFilter::Manual => game.store == "Manual",
+            StoreFilter::Steam => game.store_kind == dlss_core::StoreKind::Steam,
+            StoreFilter::Epic => game.store_kind == dlss_core::StoreKind::Epic,
+            StoreFilter::Gog => game.store_kind == dlss_core::StoreKind::Gog,
+            StoreFilter::Manual => game.store_kind == dlss_core::StoreKind::Manual,
         };
         let ids: std::collections::HashSet<_> = game.details.iter().map(|dll| &dll.id).collect();
         let custom = self
@@ -335,8 +371,8 @@ impl DlssApp {
         &mut self,
         ui: &mut egui::Ui,
         rows: &[usize],
-    ) -> (Option<GameSort>, Option<dlss_core::GameId>) {
-        let mut requested_upgrade = None;
+    ) -> (Option<GameSort>, Option<ReviewKind>) {
+        let mut requested_review = None;
         let mut requested_sort = None;
         egui_extras::TableBuilder::new(ui)
             .striped(true)
@@ -345,35 +381,41 @@ impl DlssApp {
             .column(egui_extras::Column::remainder().at_least(180.0))
             .column(egui_extras::Column::initial(90.0))
             .column(egui_extras::Column::initial(90.0))
+            .column(egui_extras::Column::initial(100.0))
             .column(egui_extras::Column::initial(110.0))
             .column(egui_extras::Column::initial(120.0))
-            .column(egui_extras::Column::initial(130.0))
+            .column(egui_extras::Column::initial(190.0))
             .header(30.0, |mut h| {
                 h.col(|_| {});
                 h.col(|ui| {
-                    ui.strong("Game");
+                    requested_sort =
+                        ui::table::sort_header(ui, "Game", SortKey::Name, self.game_sort)
+                            .or(requested_sort);
                 });
                 h.col(|ui| {
-                    ui.strong("Store");
+                    requested_sort =
+                        ui::table::sort_header(ui, "Store", SortKey::Store, self.game_sort)
+                            .or(requested_sort);
                 });
                 h.col(|ui| {
-                    let label = match self.game_sort {
-                        GameSort::DllsAscending => "DLLs ↑",
-                        GameSort::DllsDescending => "DLLs ↓",
-                        GameSort::Name => "DLLs ↕",
-                    };
-                    if ui.strong(label).clicked() {
-                        requested_sort = Some(match self.game_sort {
-                            GameSort::DllsDescending => GameSort::DllsAscending,
-                            _ => GameSort::DllsDescending,
-                        });
-                    }
+                    requested_sort =
+                        ui::table::sort_header(ui, "DLLs", SortKey::Dlls, self.game_sort)
+                            .or(requested_sort);
                 });
                 h.col(|ui| {
-                    ui.strong("Upgrades");
+                    requested_sort =
+                        ui::table::sort_header(ui, "DLSS", SortKey::DlssVersion, self.game_sort)
+                            .or(requested_sort);
                 });
                 h.col(|ui| {
-                    ui.strong("State");
+                    requested_sort =
+                        ui::table::sort_header(ui, "Upgrades", SortKey::Upgrades, self.game_sort)
+                            .or(requested_sort);
+                });
+                h.col(|ui| {
+                    requested_sort =
+                        ui::table::sort_header(ui, "State", SortKey::State, self.game_sort)
+                            .or(requested_sort);
                 });
                 h.col(|ui| {
                     ui.strong("Action");
@@ -401,6 +443,12 @@ impl DlssApp {
                         ui.label(game.dlls.to_string());
                     });
                     row.col(|ui| {
+                        ui.label(
+                            game.dlss_version
+                                .map_or_else(|| "—".into(), |version| version.to_string()),
+                        );
+                    });
+                    row.col(|ui| {
                         ui.label(game.upgrades.to_string());
                     });
                     row.col(|ui| {
@@ -410,16 +458,12 @@ impl DlssApp {
                         let available = self.catalog_release.is_some()
                             && game.dlls > 0
                             && self.upgrading.is_none();
-                        if ui
-                            .add_enabled(available, egui::Button::new("Upgrade latest"))
-                            .clicked()
-                        {
-                            requested_upgrade = Some(game.id.clone());
-                        }
+                        requested_review =
+                            game_row_action(ui, game, available).or(requested_review.take());
                     });
                 });
             });
-        (requested_sort, requested_upgrade)
+        (requested_sort, requested_review)
     }
 
     fn render_game_empty_state(&mut self, ui: &mut egui::Ui, rows_empty: bool) {
@@ -433,9 +477,12 @@ impl DlssApp {
             ui.vertical_centered(|ui| {
                 ui.add_space(90.0);
                 ui.heading("No games discovered yet");
-                ui.label("Add a game root now; automatic store discovery is enabled by platform adapters.");
+                for report in &self.discovery_reports {
+                    ui.add(egui::Label::new(discovery_report_label(report)).selectable(true))
+                        .on_hover_text(report.detail.as_deref().unwrap_or("No additional detail"));
+                }
                 if let Some(error) = &self.last_error {
-                    ui.colored_label(egui::Color32::RED, error);
+                    selectable_error(ui, error);
                 }
                 ui.add_space(8.0);
                 if ui.button("Add game folder…").clicked()
@@ -483,6 +530,10 @@ impl DlssApp {
             }
             Event::CatalogFinished(result) => self.handle_catalog_finished(result),
             Event::ReleaseFinished(result) => self.handle_release_finished(result),
+            Event::ReleaseRemoved(result) => self.handle_release_removed(result),
+            Event::ImportsLoaded(imports) => self.imports = imports,
+            Event::ImportFinished(result) => self.handle_import_finished(result),
+            Event::ImportRemoved(result) => self.handle_import_removed(result),
             Event::ReleaseProgress {
                 id,
                 state,
@@ -516,10 +567,10 @@ impl DlssApp {
 
     fn handle_scan_finished(
         &mut self,
-        result: Result<Vec<dlss_core::GameInstall>, worker::WorkerError>,
+        result: Result<dlss_core::DiscoveryOutcome, worker::WorkerError>,
     ) {
         self.runtime.scanning = false;
-        let Ok(games) = result else {
+        let Ok(outcome) = result else {
             self.last_error = result.err().map(|error| error.to_string());
             return;
         };
@@ -527,7 +578,12 @@ impl DlssApp {
             .selected
             .and_then(|index| self.games.get(index))
             .map(|game| game.id.clone());
-        self.games = games.into_iter().map(GameRow::from_install).collect();
+        self.discovery_reports = outcome.reports;
+        self.games = outcome
+            .games
+            .into_iter()
+            .map(GameRow::from_install)
+            .collect();
         self.selected = selected_id.and_then(|id| self.games.iter().position(|game| game.id == id));
         let known_dlls: std::collections::HashSet<_> = self
             .games
@@ -565,9 +621,10 @@ impl DlssApp {
         &mut self,
         result: Result<dlss_core::CachedRelease, worker::WorkerError>,
     ) {
-        self.inspecting_release = None;
+        let requested_id = self.inspecting_release.take();
         match result {
             Ok(release) => {
+                self.release_errors.remove(&release.metadata.id);
                 if let Some(existing) = self
                     .releases
                     .iter_mut()
@@ -584,7 +641,63 @@ impl DlssApp {
                 ));
                 self.refresh_upgrade_counts();
             }
-            Err(error) => self.last_error = Some(format!("Release validation: {error}")),
+            Err(error) => {
+                let message = error.to_string();
+                if let Some(id) = requested_id {
+                    self.release_errors.insert(id, message.clone());
+                }
+                self.last_error = Some(format!("Release validation: {message}"));
+            }
+        }
+    }
+
+    fn handle_release_removed(
+        &mut self,
+        result: Result<dlss_core::ReleaseId, worker::WorkerError>,
+    ) {
+        match result {
+            Ok(id) => {
+                if let Some(release) = self
+                    .releases
+                    .iter_mut()
+                    .find(|release| release.metadata.id == id)
+                {
+                    release.state = dlss_core::ReleaseState::MetadataOnly;
+                    release.dlls.clear();
+                }
+                self.release_errors.remove(&id);
+                self.toast = Some("Downloaded release removed".into());
+                self.refresh_upgrade_counts();
+            }
+            Err(error) => self.last_error = Some(format!("Could not remove release: {error}")),
+        }
+    }
+
+    fn handle_import_finished(
+        &mut self,
+        result: Result<dlss_core::ImportedDllRecord, worker::WorkerError>,
+    ) {
+        match result {
+            Ok(record) => {
+                if let Some(existing) = self
+                    .imports
+                    .iter_mut()
+                    .find(|existing| existing.sha256 == record.sha256)
+                {
+                    existing.clone_from(&record);
+                } else {
+                    self.imports.push(record);
+                }
+                self.toast = Some("NVIDIA-signed DLL imported".into());
+            }
+            Err(error) => self.last_error = Some(format!("DLL import failed: {error}")),
+        }
+    }
+
+    fn handle_import_removed(&mut self, result: Result<[u8; 32], worker::WorkerError>) {
+        match result {
+            Ok(hash) => self.imports.retain(|record| record.sha256 != hash),
+            Err(error) => self.last_error = Some(format!("Could not remove import: {error}")),
         }
     }
 
@@ -706,10 +819,9 @@ impl DlssApp {
 
     fn tools_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::Tools);
-        egui::Window::new("Global Tools").open(&mut open).default_width(520.0).show(ctx, |ui| {
+        egui::Window::new("Global Tools").open(&mut open).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).default_width(520.0).show(ctx, |ui| {
             ui.colored_label(egui::Color32::YELLOW, "Global setting — affects all compatible games on this PC");
             ui.add_space(8.0); ui.heading("DLSS on-screen indicator");
-            ui.label("Controls NVIDIA's global NGX indicator. It is never changed during scanning or DLL replacement.");
             ui.separator(); ui.label(format!("Current state: {}", state_label(&self.tool_state)));
             if !self.capabilities.system_tools { ui.weak("Unavailable: Windows NVIDIA registry controls are not supported on this platform."); }
             ui.add_enabled_ui(self.capabilities.system_tools, |ui| {
@@ -728,11 +840,13 @@ impl DlssApp {
                     if ui.add_enabled(can_restore, egui::Button::new("Restore Previous")).clicked() {
                         self.change_indicator(true);
                     }
+                    ui.label("Info").on_hover_text(
+                        "If another program changes this value, confirmation is required before apply or restore.",
+                    );
                 });
                 if let Some(error) = &self.last_error {
-                    ui.colored_label(egui::Color32::RED, error);
+                    selectable_error(ui, error);
                 }
-                ui.small("If another program changes this value, confirmation is required before apply or restore.");
             });
         });
         self.set_window_open(AppWindow::Tools, open);
@@ -740,26 +854,21 @@ impl DlssApp {
 
     fn releases_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::Releases);
-        egui::Window::new("Official Streamline releases")
+        let mut remove_release = None;
+        let mut remove_import = None;
+        egui::Window::new("DLL sources")
             .open(&mut open)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .default_width(620.0)
             .show(ctx, |ui| {
-                ui.label("Older releases remain metadata-only until requested. Validated production DLLs are then available in per-DLL selectors.");
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(!self.runtime.catalog_loading, egui::Button::new("Refresh catalog"))
-                        .clicked()
-                    {
-                        let _ = self.worker.commands.send(Command::RefreshCatalog);
-                    }
-                    if self.runtime.catalog_loading {
-                        ui.spinner();
-                        ui.label("Loading official releases…");
-                    }
-                });
+                remove_import = self.render_imports(ui);
+                ui.separator();
+                ui.heading("Official releases");
+                self.render_catalog_status(ui);
                 ui.separator();
                 if let Some(error) = &self.catalog_error {
-                    ui.colored_label(egui::Color32::RED, format!("Catalog request failed: {error}"));
+                    selectable_error(ui, &format!("Catalog request failed: {error}"));
                     ui.label("Check network access and try Refresh catalog. Previously cached releases remain usable when available.");
                 } else if !self.runtime.catalog_loading && self.releases.is_empty() {
                     ui.weak("GitHub returned no matching stable Streamline SDK release archives.");
@@ -767,9 +876,11 @@ impl DlssApp {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     for release in &self.releases {
                         ui.group(|ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.set_max_width(ui.available_width());
                             ui.horizontal(|ui| {
                                 ui.strong(&release.metadata.tag);
-                                ui.label(format!("{:?}", release.state));
+                                ui.label(release_state_label(release));
                                 if release.metadata.published_unix > 0 {
                                     ui.weak(format_timestamp(release.metadata.published_unix));
                                 }
@@ -784,25 +895,111 @@ impl DlssApp {
                                         release.metadata.id.clone(),
                                     ));
                                 }
+                                if release.state == dlss_core::ReleaseState::Ready
+                                    && ui.button("Remove download").clicked()
+                                {
+                                    remove_release = Some(release.metadata.id.clone());
+                                }
+                                ui.hyperlink_to(
+                                    "View on GitHub",
+                                    format!(
+                                        "https://github.com/NVIDIA-RTX/Streamline/releases/tag/{}",
+                                        release.metadata.tag
+                                    ),
+                                );
                             });
-                            for dll in &release.dlls {
-                                ui.small(format!(
-                                    "{}  {}",
-                                    dll.file_name.to_string_lossy(),
-                                    dll.version
-                                ));
+                            if let Some(error) = self.release_errors.get(&release.metadata.id) {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(error).color(egui::Color32::RED),
+                                    )
+                                    .selectable(true),
+                                );
+                                if ui.small_button("Retry").clicked() {
+                                    self.inspecting_release = Some(release.metadata.id.clone());
+                                    let _ = self.worker.commands.send(Command::InspectRelease(
+                                        release.metadata.id.clone(),
+                                    ));
+                                }
                             }
+                            ui.collapsing(format!("{} DLLs", release.dlls.len()), |ui| {
+                                for dll in &release.dlls {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.small(format!(
+                                            "{}  {}",
+                                            dll.file_name.to_string_lossy(),
+                                            dll.version
+                                        ));
+                                    });
+                                }
+                            });
                         });
                     }
                 });
             });
+        if let Some(id) = remove_release {
+            let _ = self.worker.commands.send(Command::RemoveRelease(id));
+        }
+        if let Some(hash) = remove_import {
+            let _ = self.worker.commands.send(Command::RemoveImport(hash));
+        }
         self.set_window_open(AppWindow::Releases, open);
+    }
+
+    fn render_imports(&mut self, ui: &mut egui::Ui) -> Option<[u8; 32]> {
+        let mut remove = None;
+        ui.horizontal(|ui| {
+            ui.heading("Imported DLLs");
+            if ui.button("Import DLL…").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Windows DLL", &["dll"])
+                    .pick_file()
+            {
+                let _ = self.worker.commands.send(Command::ImportDll(path));
+            }
+        });
+        ui.weak("x86-64 NVIDIA-signed DLL files only; ZIP is not supported.");
+        for record in &self.imports {
+            ui.group(|ui| {
+                ui.set_min_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.strong(dlss_core::friendly_dll_label(&record.file_name));
+                    ui.label(record.version.to_string());
+                    ui.weak(&record.signer);
+                    ui.weak(format_timestamp(record.imported_unix));
+                    if ui.small_button("Remove").clicked() {
+                        remove = Some(record.sha256);
+                    }
+                });
+            });
+        }
+        remove
+    }
+
+    fn render_catalog_status(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(
+                    !self.runtime.catalog_loading,
+                    egui::Button::new("Refresh catalog"),
+                )
+                .clicked()
+            {
+                let _ = self.worker.commands.send(Command::RefreshCatalog);
+            }
+            if self.runtime.catalog_loading {
+                ui.spinner();
+                ui.label("Loading official releases…");
+            }
+        });
     }
 
     fn activity_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::Activity);
         egui::Window::new("Activity history")
             .open(&mut open)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .default_width(560.0)
             .show(ctx, |ui| {
                 if self.persisted.activity.is_empty() {
@@ -826,15 +1023,25 @@ impl DlssApp {
         let mut open = self.open_windows.contains(&AppWindow::Roots);
         egui::Window::new("Game folders")
             .open(&mut open)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .default_width(620.0)
             .show(ctx, |ui| {
-                ui.label("Manually added roots are scanned in addition to supported stores.");
-                ui.separator();
                 if self.persisted.custom_roots.is_empty() {
                     ui.weak("No manual roots configured.");
                 }
+                for report in &self.discovery_reports {
+                    ui.add(egui::Label::new(discovery_report_label(report)).selectable(true))
+                        .on_hover_text(report.detail.as_deref().unwrap_or("No additional detail"));
+                }
+                ui.separator();
                 for root in &self.persisted.custom_roots {
-                    ui.monospace(root.display().to_string());
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(root.display().to_string()).monospace(),
+                        )
+                        .selectable(true),
+                    );
                 }
                 ui.add_space(8.0);
                 if ui.button("Add game folder…").clicked()
@@ -994,21 +1201,24 @@ impl DlssApp {
             .map(|release| release.dlls.clone())
             .unwrap_or_default();
         for game in &mut self.games {
-            game.upgrades = game
+            let is_upgrade = |installed: &&dlss_core::DllInstallation| {
+                let Some(installed_version) = installed.metadata.version else {
+                    return false;
+                };
+                latest.iter().any(|candidate| {
+                    dlss_core::same_file_name(&candidate.file_name, &installed.file_name)
+                        && candidate.version > installed_version
+                })
+            };
+            game.upgrades = game.details.iter().filter(is_upgrade).count();
+            game.dlss_upgrades = game
                 .details
                 .iter()
                 .filter(|installed| {
-                    let Some(installed_version) = installed.metadata.version else {
-                        return false;
-                    };
-                    latest.iter().any(|candidate| {
-                        candidate
-                            .file_name
-                            .to_string_lossy()
-                            .eq_ignore_ascii_case(&installed.file_name.to_string_lossy())
-                            && candidate.version > installed_version
-                    })
+                    dlss_core::DllKind::classify(&installed.file_name)
+                        .is_some_and(dlss_core::DllKind::is_dlss_family)
                 })
+                .filter(is_upgrade)
                 .count();
         }
     }
@@ -1041,7 +1251,22 @@ impl DlssApp {
             .collapsible(false)
             .resizable(false)
             .open(&mut keep_open)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
+            .default_width(520.0)
             .show(ctx, |ui| {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Anti-cheat may treat DLL swaps as tampering.",
+                );
+                if matches!(review, ReviewKind::QuickDlss(_)) {
+                    ui.weak("Streamline is never touched by Quick update.");
+                } else if self.review_touches_streamline(&review) {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 140, 40),
+                        "Streamline replacements can reduce performance or crash games.",
+                    );
+                }
                 ui.colored_label(
                     egui::Color32::YELLOW,
                     "Each DLL is re-inspected, backed up, replaced independently, and verified.",
@@ -1097,6 +1322,21 @@ impl DlssApp {
                 ));
                 ui.label("Only strictly newer, same-named official DLLs will change. Unknown, equal, newer, and different-build DLLs are preserved.");
             }
+            ReviewKind::QuickDlss(ids) => {
+                let latest = self.latest_catalog();
+                let upgrades: usize = self
+                    .games
+                    .iter()
+                    .filter(|game| ids.contains(&game.id))
+                    .map(|game| {
+                        dlss_core::plan_dlss_only_upgrades("preview", &game.details, &latest)
+                            .swaps
+                            .len()
+                    })
+                    .sum();
+                ui.heading(format!("{} games · {upgrades} DLSS updates", ids.len()));
+                ui.label("Streamline and Reflex DLLs are never touched.");
+            }
             ReviewKind::Profiles(game_ids) => self.render_profile_review(ui, game_ids),
         }
     }
@@ -1126,15 +1366,19 @@ impl DlssApp {
                             .saturating_sub(summary.upgrades + summary.downgrades)
                     ));
                     for swap in plan.swaps {
-                        ui.small(format!(
-                            "{:?}  {}",
-                            swap.comparison,
-                            swap.target_path.display()
-                        ));
+                        ui.add(
+                            egui::Label::new(format!(
+                                "{}  {}",
+                                comparison_label(swap.comparison),
+                                swap.target_path.display()
+                            ))
+                            .selectable(true),
+                        );
                     }
                 }
                 Err(error) => {
-                    ui.label(format!("1 download/validation requirement · {error}"));
+                    ui.add(egui::Label::new(profile_preview_error_label(&error)).selectable(true))
+                        .on_hover_text(error);
                 }
             }
         }
@@ -1147,10 +1391,18 @@ impl DlssApp {
         match review {
             ReviewKind::BulkLatest(ids) => {
                 for id in ids {
-                    let _ = self
-                        .worker
-                        .commands
-                        .send(Command::UpgradeLatest(id.clone()));
+                    let _ = self.worker.commands.send(Command::UpgradeLatest(
+                        id.clone(),
+                        worker::UpgradeScope::AllManaged,
+                    ));
+                }
+            }
+            ReviewKind::QuickDlss(ids) => {
+                for id in ids {
+                    let _ = self.worker.commands.send(Command::UpgradeLatest(
+                        id.clone(),
+                        worker::UpgradeScope::DlssOnly,
+                    ));
                 }
             }
             ReviewKind::Profiles(game_ids) => {
@@ -1162,6 +1414,38 @@ impl DlssApp {
                         .commands
                         .send(Command::ApplyProfile(game_id.clone(), profile));
                 }
+            }
+        }
+    }
+
+    fn review_touches_streamline(&self, review: &ReviewKind) -> bool {
+        match review {
+            ReviewKind::QuickDlss(_) => false,
+            ReviewKind::BulkLatest(ids) => {
+                let latest = self.latest_catalog();
+                let plans: Vec<_> = self
+                    .games
+                    .iter()
+                    .filter(|game| ids.contains(&game.id))
+                    .map(|game| dlss_core::plan_strict_upgrades("preview", &game.details, &latest))
+                    .collect();
+                dlss_core::plan_touches_streamline(&plans)
+            }
+            ReviewKind::Profiles(ids) => {
+                let previews: Vec<_> = ids.iter().map(|id| self.preview_profile(id)).collect();
+                let preview_failed = previews.iter().any(Result::is_err);
+                let plans: Vec<_> = previews.into_iter().filter_map(Result::ok).collect();
+                dlss_core::plan_touches_streamline(&plans)
+                    || preview_failed
+                        && ids.iter().any(|id| {
+                            self.games.iter().any(|game| {
+                                game.id == *id
+                                    && game.details.iter().any(|dll| {
+                                        dlss_core::DllKind::classify(&dll.file_name)
+                                            == Some(dlss_core::DllKind::Streamline)
+                                    })
+                            })
+                        })
             }
         }
     }
@@ -1205,11 +1489,14 @@ impl DlssApp {
             .find(|game| &game.id == game_id)
             .ok_or_else(|| "game is no longer in the scan".to_owned())?;
         let latest = self.latest_catalog();
-        let cached: Vec<_> = self
+        let mut cached: Vec<_> = self
             .releases
             .iter()
             .flat_map(|release| release.dlls.iter().cloned())
             .collect();
+        cached.extend(dlss_core::imported_catalog_dlls(&dlss_core::ImportIndex {
+            records: self.imports.clone(),
+        }));
         dlss_core::plan_target_profile(
             "preview",
             &game.details,
@@ -1233,6 +1520,89 @@ fn canonicalize_roots(roots: &mut Vec<std::path::PathBuf>) {
     *roots = normalized;
 }
 
+fn game_row_action(ui: &mut egui::Ui, game: &GameRow, available: bool) -> Option<ReviewKind> {
+    let mut review = None;
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(
+                available && game.dlss_upgrades > 0,
+                egui::Button::new("Update DLSS"),
+            )
+            .clicked()
+        {
+            review = Some(ReviewKind::QuickDlss(vec![game.id.clone()]));
+        }
+        if ui
+            .add_enabled(available, egui::Button::new("All DLLs"))
+            .clicked()
+        {
+            review = Some(ReviewKind::BulkLatest(vec![game.id.clone()]));
+        }
+    });
+    review
+}
+
+fn selectable_error(ui: &mut egui::Ui, error: &str) {
+    ui.add(egui::Label::new(egui::RichText::new(error).color(egui::Color32::RED)).selectable(true));
+}
+
+fn profile_preview_error_label(error: &str) -> &'static str {
+    if error.contains("desired source is unavailable") {
+        "Required DLL source is unavailable. Download it or choose another target."
+    } else if error.contains("unknown DLL installation") {
+        "The selected DLL is no longer present. Rescan and review the target."
+    } else {
+        "The staged target cannot be applied. Hover for technical details."
+    }
+}
+
+fn discovery_report_label(report: &dlss_core::StoreDiscoveryReport) -> String {
+    let status = match report.status {
+        dlss_core::DiscoveryStatus::Found => format!("found ({} games)", report.games_found),
+        dlss_core::DiscoveryStatus::NotDetected => "not detected".into(),
+        dlss_core::DiscoveryStatus::Error => "error".into(),
+    };
+    format!("{} — {status}", report.store)
+}
+
+fn dll_kind_rank(file_name: &std::ffi::OsStr) -> u8 {
+    match dlss_core::DllKind::classify(file_name) {
+        Some(dlss_core::DllKind::DlssSuperResolution) => 0,
+        Some(dlss_core::DllKind::DlssFrameGeneration) => 1,
+        Some(dlss_core::DllKind::DlssRayReconstruction) => 2,
+        Some(dlss_core::DllKind::ReflexLowLatency) => 3,
+        Some(dlss_core::DllKind::Streamline) => 4,
+        Some(dlss_core::DllKind::OtherNgx) => 5,
+        None => 6,
+    }
+}
+
+fn dll_kind_heading(kind: Option<dlss_core::DllKind>) -> &'static str {
+    match kind {
+        Some(dlss_core::DllKind::DlssSuperResolution) => "DLSS Super Resolution",
+        Some(dlss_core::DllKind::DlssFrameGeneration) => "DLSS Frame Generation",
+        Some(dlss_core::DllKind::DlssRayReconstruction) => "DLSS Ray Reconstruction",
+        Some(dlss_core::DllKind::ReflexLowLatency) => "NVIDIA Reflex",
+        Some(dlss_core::DllKind::Streamline) => "Streamline",
+        Some(dlss_core::DllKind::OtherNgx) => "Other NGX",
+        None => "Other",
+    }
+}
+
+fn release_state_label(release: &dlss_core::CachedRelease) -> String {
+    match release.state {
+        dlss_core::ReleaseState::MetadataOnly => "Not downloaded".into(),
+        dlss_core::ReleaseState::Downloading => "Downloading…".into(),
+        dlss_core::ReleaseState::Downloaded | dlss_core::ReleaseState::Validating => {
+            "Validating…".into()
+        }
+        dlss_core::ReleaseState::Ready => {
+            format!("Downloaded ({} DLLs)", release.dlls.len())
+        }
+        dlss_core::ReleaseState::Invalid => "Failed".into(),
+    }
+}
+
 impl eframe::App for DlssApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive_worker_events(ctx);
@@ -1246,6 +1616,9 @@ impl eframe::App for DlssApp {
         reason = "the eframe root method declaratively composes independent panels and overlays"
     )]
     fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if !self.persisted.disclaimer_acknowledged {
+            root.disable();
+        }
         egui::Panel::top("toolbar").show(root, |ui| {
             ui.add_space(5.0);
             self.toolbar(ui);
@@ -1260,14 +1633,26 @@ impl eframe::App for DlssApp {
                 if let Some(index) = self.selected {
                     let game_id = self.games[index].id.clone();
                     let game_name = self.games[index].name.clone();
+                    let game_root = self.games[index].root.clone();
                     let dll_count = self.games[index].dlls;
-                    let details = self.games[index].details.clone();
+                    let mut details = self.games[index].details.clone();
+                    details.sort_by_key(|dll| dll_kind_rank(&dll.file_name));
                     ui.heading(game_name);
+                    ui.add(
+                        egui::Label::new(game_root.display().to_string()).selectable(true),
+                    );
                     ui.label(format!("{dll_count} managed DLLs"));
                     ui.add_space(8.0);
                     egui::ScrollArea::vertical().show(ui, |ui| {
+                        let mut previous_kind = None;
                         for dll in &details {
-                            let cached_options: Vec<_> = self
+                            let kind = dlss_core::DllKind::classify(&dll.file_name);
+                            if kind != previous_kind {
+                                ui.strong(dll_kind_heading(kind));
+                                ui.add_space(2.0);
+                                previous_kind = kind;
+                            }
+                            let mut cached_options: Vec<_> = self
                                 .releases
                                 .iter()
                                 .filter(|release| release.state == dlss_core::ReleaseState::Ready)
@@ -1295,6 +1680,17 @@ impl eframe::App for DlssApp {
                                         })
                                 })
                                 .collect();
+                            cached_options.extend(self.imports.iter().filter(|record| {
+                                dlss_core::same_file_name(&record.file_name, &dll.file_name)
+                            }).map(|record| {
+                                (
+                                    dlss_core::DesiredDll::Cached {
+                                        release: dlss_core::imported_release_id(record.sha256),
+                                        sha256: record.sha256,
+                                    },
+                                    format!("Imported {}", record.version),
+                                )
+                            }));
                             let restore_options: Vec<_> = self
                                 .backups
                                 .iter()
@@ -1326,9 +1722,13 @@ impl eframe::App for DlssApp {
                                             self.selected_dlls.remove(&dll.id);
                                         }
                                     }
-                                    ui.strong(dll.file_name.to_string_lossy());
+                                    ui.strong(dlss_core::friendly_dll_label(&dll.file_name));
+                                    ui.small(dll.file_name.to_string_lossy());
                                 });
-                                ui.small(dll.path.display().to_string());
+                                ui.add(
+                                    egui::Label::new(dll.path.display().to_string())
+                                        .selectable(true),
+                                );
                                 ui.horizontal(|ui| {
                                     ui.label("Installed:");
                                     ui.monospace(
@@ -1338,7 +1738,7 @@ impl eframe::App for DlssApp {
                                         ),
                                     );
                                 });
-                                ui.label(format!("Signature: {:?}", dll.metadata.signature));
+                                ui.label(signature_label(dll.metadata.signature));
                                 let comparison = self
                                     .latest_catalog()
                                     .into_iter()
@@ -1352,7 +1752,7 @@ impl eframe::App for DlssApp {
                                     .map_or(dlss_core::Comparison::Unavailable, |target| {
                                         dlss_core::compare_dll(Some(&dll.metadata), Some(&target))
                                     });
-                                ui.label(format!("Latest comparison: {comparison:?}"));
+                                ui.label(comparison_label(comparison));
                                 ui.horizontal(|ui| {
                                     ui.label("Desired:");
                                     // Render from a local value and only write back on an actual
@@ -1437,7 +1837,7 @@ impl eframe::App for DlssApp {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.horizontal(|ui| {
-                        ui.colored_label(egui::Color32::RED, error);
+                        selectable_error(ui, &error);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.small_button("Dismiss").clicked() {
                                 self.last_error = None;
@@ -1570,12 +1970,41 @@ impl eframe::App for DlssApp {
                 let _ = self.worker.commands.send(Command::UndoLast(game_id));
             }
         }
+        if !self.persisted.disclaimer_acknowledged {
+            egui::Window::new("Before you continue")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .show(root.ctx(), |ui| {
+                    ui.label("• Online/anti-cheat games may detect DLL swaps and ban you.");
+                    ui.label("• Replacing Streamline DLLs may reduce performance or crash.");
+                    ui.add_space(8.0);
+                    if ui.button("I understand").clicked() {
+                        self.persisted.disclaimer_acknowledged = true;
+                    }
+                });
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn installation(name: &str, version: dlss_core::DllVersion) -> dlss_core::DllInstallation {
+        dlss_core::DllInstallation {
+            id: dlss_core::DllInstallationId(name.into()),
+            game_id: dlss_core::GameId("game".into()),
+            path: std::path::PathBuf::from(name),
+            file_name: name.into(),
+            metadata: dlss_core::DllMetadata {
+                version: Some(version),
+                sha256: [0; 32],
+                signature: dlss_core::SignatureStatus::Trusted,
+                x86_64: true,
+            },
+        }
+    }
 
     #[test]
     fn tool_and_desired_labels_preserve_custom_meaning() {
@@ -1594,5 +2023,56 @@ mod tests {
             }),
             "Cached v2"
         );
+        assert_eq!(
+            desired_label(&dlss_core::DesiredDll::Cached {
+                release: dlss_core::ReleaseId(format!("import:{}", "0".repeat(64))),
+                sha256: [0; 32],
+            }),
+            "Imported"
+        );
+        assert_eq!(
+            signature_label(dlss_core::SignatureStatus::Trusted),
+            "Signed (trusted)"
+        );
+        assert_eq!(
+            comparison_label(dlss_core::Comparison::Upgrade),
+            "Update available"
+        );
+    }
+
+    #[test]
+    fn game_row_uses_only_the_highest_super_resolution_version() {
+        let older = dlss_core::DllVersion::new(2, 5, 0, 0);
+        let newer = dlss_core::DllVersion::new(3, 7, 10, 0);
+        let game = dlss_core::GameInstall {
+            id: dlss_core::GameId("game".into()),
+            name: "Game".into(),
+            store: dlss_core::StoreKind::Manual,
+            root: ".".into(),
+            dlls: vec![
+                installation("nvngx_dlss.dll", older),
+                installation("NVNGX_DLSS.DLL", newer),
+                installation("nvngx_dlssg.dll", dlss_core::DllVersion::new(9, 0, 0, 0)),
+            ],
+            inspection_errors: 0,
+        };
+        assert_eq!(GameRow::from_install(game).dlss_version, Some(newer));
+    }
+
+    #[test]
+    fn persisted_disclaimer_defaults_to_unacknowledged() {
+        assert!(!PersistedState::default().disclaimer_acknowledged);
+        let old_state: PersistedState = serde_json::from_str("{}").unwrap();
+        assert!(!old_state.disclaimer_acknowledged);
+    }
+
+    #[test]
+    fn profile_preview_errors_hide_internal_installation_ids() {
+        let raw = "desired source is unavailable for DLL installation manual:00610062";
+        assert_eq!(
+            profile_preview_error_label(raw),
+            "Required DLL source is unavailable. Download it or choose another target."
+        );
+        assert!(!profile_preview_error_label(raw).contains("manual:"));
     }
 }

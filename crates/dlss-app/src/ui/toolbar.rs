@@ -34,6 +34,10 @@ impl DlssApp {
                 }
             });
         });
+        self.toolbar_controls(ui);
+    }
+
+    fn toolbar_controls(&mut self, ui: &mut egui::Ui) {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             ui.add_sized(
@@ -85,6 +89,37 @@ impl DlssApp {
             if self.runtime.scanning {
                 ui.spinner();
                 ui.weak("Scanning…");
+            }
+            let quick_ready = self.catalog_release.is_some()
+                && !self.runtime.scanning
+                && self.upgrading.is_none()
+                && self.games.iter().any(|game| game.dlls > 0);
+            if ui
+                .add_enabled(quick_ready, egui::Button::new("Quick update DLSS"))
+                .clicked()
+            {
+                self.review = Some(super::super::ReviewKind::QuickDlss(
+                    self.games
+                        .iter()
+                        .filter(|game| game.dlls > 0)
+                        .map(|game| game.id.clone())
+                        .collect(),
+                ));
+            }
+            if let Some(report) = self.discovery_reports.iter().find(|report| {
+                report.games_found == 0
+                    && matches!(
+                        report.status,
+                        dlss_core::DiscoveryStatus::NotDetected | dlss_core::DiscoveryStatus::Error
+                    )
+            }) {
+                ui.colored_label(egui::Color32::YELLOW, "Store warning")
+                    .on_hover_text(
+                        report
+                            .detail
+                            .as_deref()
+                            .unwrap_or("A store was not detected"),
+                    );
             }
         });
     }
