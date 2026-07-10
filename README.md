@@ -1,6 +1,25 @@
 # DLSS Updater
 
-Windows-first desktop manager for official NVIDIA Streamline/DLSS DLLs. The UI supports strict one-click upgrades, reviewed bulk changes, mixed per-DLL profiles, versioned backups with Undo, and the reversible global DLSS indicator control.
+[![CI](https://github.com/handsomefox/dlss-updater/actions/workflows/ci.yml/badge.svg)](https://github.com/handsomefox/dlss-updater/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+A Windows desktop manager for safely updating official NVIDIA Streamline and DLSS DLLs.
+
+## Features
+
+- Discovers supported Steam, Epic Games Store, and GOG installations.
+- Supports manually managed game folders.
+- Offers strict one-click upgrades and reviewed per-DLL or bulk changes.
+- Downloads official NVIDIA Streamline release archives on demand.
+- Validates archive paths, sizes, PE architecture, hashes, and Authenticode trust.
+- Creates content-addressed backups and supports immediate Undo and older restores.
+- Includes a scoped, reversible NVIDIA DLSS indicator control.
+
+## Safety model
+
+Every replacement is planned against the installed DLL hash, backed up before mutation, and verified after replacement. Operations requiring administrator rights are passed to a narrow elevated helper that independently validates the plan and permits only known game paths and the allowlisted indicator setting.
+
+This project is not affiliated with or endorsed by NVIDIA. DLSS, NVIDIA, and Streamline are trademarks of NVIDIA Corporation.
 
 ## Development
 
@@ -25,3 +44,11 @@ bash scripts/package-windows.sh
 ```
 
 The application downloads only official `NVIDIA-RTX/Streamline` release assets. Historical tags remain metadata-only until explicitly downloaded and validated. Local ZIP imports and Microsoft Store/Xbox discovery are intentionally unsupported in v1.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Please report security-sensitive issues according to [SECURITY.md](SECURITY.md).
+
+## License
+
+Licensed under the [MIT License](LICENSE).

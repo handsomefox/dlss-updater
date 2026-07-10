@@ -6,6 +6,8 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/handsomefox/dlss-updater"
+description = "A Windows desktop app for safely updating official NVIDIA DLSS and Streamline DLLs"
 
 [workspace.dependencies]
 crossbeam-channel = "0.5"
