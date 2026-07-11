@@ -180,10 +180,12 @@ struct GameRow {
     last_operation: String,
     details: Vec<dlss_core::DllInstallation>,
     inspection_errors: usize,
+    known_risk: Option<&'static str>,
 }
 
 impl GameRow {
     fn from_install(game: dlss_core::GameInstall) -> Self {
+        let known_risk = dlss_core::known_game_risk(&game);
         let dll_count = game.dlls.len();
         let inspection_errors = game.inspection_errors;
         let has_unknown = game.dlls.iter().any(|dll| dll.metadata.version.is_none());
@@ -225,6 +227,7 @@ impl GameRow {
             last_operation: "Never".into(),
             details: game.dlls,
             inspection_errors,
+            known_risk,
         }
     }
 }

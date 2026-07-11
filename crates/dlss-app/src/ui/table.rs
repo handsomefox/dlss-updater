@@ -118,6 +118,7 @@ mod tests {
             last_operation: "Never".into(),
             details: Vec::new(),
             inspection_errors: 0,
+            known_risk: None,
         }
     }
 

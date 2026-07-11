@@ -139,14 +139,23 @@ impl DlssApp {
                         ui.checkbox(&mut game.selected, "");
                     });
                     row.col(|ui| {
-                        let name = egui::RichText::new(&game.name).strong();
-                        if ui
-                            .add(egui::Button::new(name).frame(false))
-                            .on_hover_text("Open game details")
-                            .clicked()
-                        {
-                            requested_open = Some(game.id.clone());
-                        }
+                        ui.horizontal(|ui| {
+                            let name = egui::RichText::new(&game.name).strong();
+                            if ui
+                                .add(egui::Button::new(name).frame(false))
+                                .on_hover_text("Open game details")
+                                .clicked()
+                            {
+                                requested_open = Some(game.id.clone());
+                            }
+                            if let Some(risk_name) = game.known_risk {
+                                widgets::chip(ui, icons::WARNING, "Risk", theme::WARNING);
+                                ui.response().on_hover_text(format!(
+                                    "Known-risk game: {risk_name}. {}",
+                                    dlss_core::KNOWN_GAME_RISK_WARNING
+                                ));
+                            }
+                        });
                     });
                     row.col(|ui| {
                         widgets::badge(ui, game.store, theme::INFO);

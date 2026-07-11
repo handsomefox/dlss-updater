@@ -108,6 +108,9 @@ impl DlssApp {
                 }
                 ui.heading(&game.name);
                 widgets::badge(ui, game.store, theme::INFO);
+                if game.known_risk.is_some() {
+                    widgets::chip(ui, icons::WARNING, "Known risk", theme::WARNING);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if in_flight {
                         ui.spinner();
@@ -157,6 +160,15 @@ impl DlssApp {
                     .selectable(true),
                 );
             });
+            if let Some(risk_name) = game.known_risk {
+                widgets::banner(
+                    ui,
+                    theme::WARNING,
+                    icons::WARNING,
+                    &format!("{risk_name}: {}", dlss_core::KNOWN_GAME_RISK_WARNING),
+                    false,
+                );
+            }
             ui.horizontal(|ui| {
                 ui.weak(format!("{} managed DLLs", game.dlls));
                 if game.last_operation != "Never" {

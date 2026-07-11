@@ -29,6 +29,7 @@ pub(crate) struct ReviewRow {
     desired: dlss_core::DesiredDll,
     comparison: dlss_core::Comparison,
     checked: bool,
+    known_risk: Option<&'static str>,
 }
 
 impl ReviewRow {
@@ -98,6 +99,7 @@ impl DlssApp {
                             },
                             comparison: swap.comparison,
                             checked: true,
+                            known_risk: game.known_risk,
                         });
                     }
                 }
@@ -135,6 +137,7 @@ impl DlssApp {
                                     desired,
                                     comparison: swap.comparison,
                                     checked: true,
+                                    known_risk: game.known_risk,
                                 });
                             }
                         }
@@ -335,6 +338,15 @@ fn review_warnings(ui: &mut egui::Ui, review: &ReviewState) {
         "Anti-cheat may treat DLL swaps as tampering.",
         false,
     );
+    for risk_name in checked_risk_games(&review.rows) {
+        widgets::banner(
+            ui,
+            theme::WARNING,
+            icons::WARNING,
+            &format!("{risk_name}: {}", dlss_core::KNOWN_GAME_RISK_WARNING),
+            false,
+        );
+    }
     if matches!(review.intent, ReviewIntent::QuickDlss(_)) {
         ui.weak("Streamline and Reflex DLLs are never touched by Quick update.");
     } else if review
@@ -351,6 +363,13 @@ fn review_warnings(ui: &mut egui::Ui, review: &ReviewState) {
         );
     }
     ui.weak("Each DLL is re-inspected, backed up, replaced independently, and verified.");
+}
+
+fn checked_risk_games(rows: &[ReviewRow]) -> std::collections::BTreeSet<&'static str> {
+    rows.iter()
+        .filter(|row| row.checked)
+        .filter_map(|row| row.known_risk)
+        .collect()
 }
 
 fn review_row_list(ui: &mut egui::Ui, review: &mut ReviewState) {
@@ -432,5 +451,32 @@ mod tests {
             "Required DLL source is unavailable. Download it or choose another target."
         );
         assert!(!profile_preview_error_label(raw).contains("manual:"));
+    }
+
+    fn risk_row(game_id: &str, risk: Option<&'static str>, checked: bool) -> ReviewRow {
+        ReviewRow {
+            game_id: dlss_core::GameId::from(game_id),
+            game_name: game_id.into(),
+            dll_id: dlss_core::DllInstallationId::from(format!("{game_id}-dll")),
+            file_name: "nvngx_dlss.dll".into(),
+            installed: None,
+            target: None,
+            desired: dlss_core::DesiredDll::KeepInstalled,
+            comparison: dlss_core::Comparison::Unknown,
+            checked,
+            known_risk: risk,
+        }
+    }
+
+    #[test]
+    fn checked_risk_warnings_are_deduplicated_and_dynamic() {
+        let rows = [
+            risk_row("fortnite-1", Some("Fortnite"), true),
+            risk_row("fortnite-2", Some("Fortnite"), true),
+            risk_row("finals", Some("The Finals"), false),
+            risk_row("safe", None, true),
+        ];
+        assert_eq!(checked_risk_games(&rows), ["Fortnite"].into());
+        assert!(checked_risk_games(&rows[2..]).is_empty());
     }
 }

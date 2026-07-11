@@ -1,11 +1,13 @@
 //! Platform-neutral domain model and provider contracts.
 
+mod game_risk;
 mod imports;
 mod model;
 mod tools;
 mod traits;
 mod workflow;
 
+pub use game_risk::*;
 pub use imports::*;
 pub use model::*;
 pub use tools::*;
