@@ -25,6 +25,8 @@ pub(crate) const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(0x93, 0xA1,
 
 /// NVIDIA green; doubles as the success color so the palette stays cohesive.
 pub(crate) const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x76, 0xB9, 0x00);
+/// High-contrast foreground for controls filled with [`ACCENT`].
+pub(crate) const TEXT_ON_ACCENT: egui::Color32 = egui::Color32::from_rgb(0x0E, 0x11, 0x16);
 pub(crate) const SUCCESS: egui::Color32 = ACCENT;
 pub(crate) const WARNING: egui::Color32 = egui::Color32::from_rgb(0xF0, 0xB4, 0x29);
 pub(crate) const DANGER: egui::Color32 = egui::Color32::from_rgb(0xE5, 0x54, 0x58);

@@ -5,12 +5,17 @@ use super::theme::{self, icons};
 use eframe::egui;
 
 pub(crate) fn icon_text(icon: &str, label: &str) -> egui::WidgetText {
+    colored_icon_text(icon, label, None)
+}
+
+fn colored_icon_text(icon: &str, label: &str, color: Option<egui::Color32>) -> egui::WidgetText {
     let mut job = egui::text::LayoutJob::default();
     job.append(
         icon,
         0.0,
         egui::TextFormat {
             font_id: theme::icon_font(15.0),
+            color: color.unwrap_or_default(),
             ..Default::default()
         },
     );
@@ -20,11 +25,22 @@ pub(crate) fn icon_text(icon: &str, label: &str) -> egui::WidgetText {
             5.0,
             egui::TextFormat {
                 font_id: egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                color: color.unwrap_or_default(),
                 ..Default::default()
             },
         );
     }
     job.into()
+}
+
+pub(crate) fn primary_button(label: impl Into<String>) -> egui::Button<'static> {
+    egui::Button::new(egui::RichText::new(label.into()).color(theme::TEXT_ON_ACCENT))
+        .fill(theme::ACCENT)
+}
+
+pub(crate) fn primary_icon_button(icon: &str, label: &str) -> egui::Button<'static> {
+    egui::Button::new(colored_icon_text(icon, label, Some(theme::TEXT_ON_ACCENT)))
+        .fill(theme::ACCENT)
 }
 
 pub(crate) fn text_icon(label: &str, icon: &str) -> egui::WidgetText {
@@ -164,4 +180,29 @@ pub(crate) fn banner(
             });
         });
     dismissed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accent_foreground_has_accessible_contrast() {
+        fn luminance(color: egui::Color32) -> f32 {
+            let channel = |value: u8| {
+                let value = f32::from(value) / 255.0;
+                if value <= 0.04045 {
+                    value / 12.92
+                } else {
+                    ((value + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * channel(color.r()) + 0.7152 * channel(color.g()) + 0.0722 * channel(color.b())
+        }
+
+        let ratio = (luminance(theme::ACCENT) + 0.05) / (luminance(theme::TEXT_ON_ACCENT) + 0.05);
+        assert!(ratio >= 4.5, "accent contrast ratio was {ratio}");
+        let _ = primary_button("Apply changes");
+        let _ = primary_icon_button(icons::SPARKLE, "Update DLSS");
+    }
 }

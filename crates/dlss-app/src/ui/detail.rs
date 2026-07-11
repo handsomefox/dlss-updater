@@ -114,10 +114,7 @@ impl DlssApp {
                         ui.label("Updating…");
                         return;
                     }
-                    let primary = egui::Button::new(
-                        egui::RichText::new("Update DLSS").color(egui::Color32::BLACK),
-                    )
-                    .fill(theme::ACCENT);
+                    let primary = widgets::primary_button("Update DLSS");
                     if ui
                         .add_enabled(can_update, primary)
                         .on_hover_text("Review and update this game's DLSS DLLs")
@@ -395,10 +392,7 @@ impl DlssApp {
                 if staged == 1 { "change" } else { "changes" }
             ));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let primary = egui::Button::new(
-                    egui::RichText::new("Review & apply").color(egui::Color32::BLACK),
-                )
-                .fill(theme::ACCENT);
+                let primary = widgets::primary_button("Review & apply");
                 if ui.add(primary).clicked() {
                     self.open_review(ReviewIntent::Profiles(vec![game_id.clone()]));
                 }

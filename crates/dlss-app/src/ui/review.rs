@@ -219,9 +219,7 @@ impl DlssApp {
                     } else {
                         format!("Apply {checked} changes")
                     };
-                    let primary =
-                        egui::Button::new(egui::RichText::new(label).color(egui::Color32::BLACK))
-                            .fill(theme::ACCENT);
+                    let primary = widgets::primary_button(label);
                     apply = ui.add_enabled(checked > 0, primary).clicked();
                     if ui.button("Cancel").clicked() {
                         cancel = true;

@@ -1416,11 +1416,10 @@ impl eframe::App for DlssApp {
                                     ui.label("The last DLL change can still be undone.");
                                 }
                                 if let Some(game_id) = &self.undo_game {
-                                    let undo = egui::Button::new(widgets::icon_text(
+                                    let undo = widgets::primary_icon_button(
                                         icons::ARROW_U_UP_LEFT,
                                         "Undo",
-                                    ))
-                                    .fill(theme::ACCENT);
+                                    );
                                     if ui.add(undo).clicked() {
                                         undo_requested = Some(game_id.clone());
                                     }
@@ -1459,10 +1458,7 @@ impl eframe::App for DlssApp {
                         false,
                     );
                     ui.add_space(8.0);
-                    let acknowledge = egui::Button::new(
-                        egui::RichText::new("I understand").color(egui::Color32::BLACK),
-                    )
-                    .fill(theme::ACCENT);
+                    let acknowledge = widgets::primary_button("I understand");
                     if ui.add(acknowledge).clicked() {
                         self.persisted.disclaimer_acknowledged = true;
                     }
