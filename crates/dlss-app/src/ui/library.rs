@@ -126,11 +126,7 @@ impl DlssApp {
                     });
                     row.col(|ui| {
                         if game.upgrades > 0 {
-                            widgets::badge(
-                                ui,
-                                format!("{} {}", icons::ARROW_CIRCLE_UP, game.upgrades),
-                                theme::ACCENT,
-                            );
+                            widgets::badge(ui, game.upgrades.to_string(), theme::ACCENT);
                         } else {
                             ui.weak("—");
                         }
@@ -165,11 +161,11 @@ impl DlssApp {
         if self.games.is_empty() {
             ui.vertical_centered(|ui| {
                 ui.add_space(70.0);
-                ui.label(
-                    egui::RichText::new(icons::GAME_CONTROLLER)
-                        .size(52.0)
-                        .color(theme::TEXT_MUTED),
-                );
+                ui.label(widgets::icon(
+                    icons::GAME_CONTROLLER,
+                    52.0,
+                    theme::TEXT_MUTED,
+                ));
                 ui.add_space(4.0);
                 ui.heading("No games discovered yet");
                 for report in &self.discovery_reports {
@@ -181,7 +177,7 @@ impl DlssApp {
                 }
                 ui.add_space(8.0);
                 if ui
-                    .button(format!("{} Add game folder…", icons::FOLDER_PLUS))
+                    .button(widgets::icon_text(icons::FOLDER_PLUS, "Add game folder…"))
                     .clicked()
                     && let Some(root) = rfd::FileDialog::new().pick_folder()
                 {
@@ -252,7 +248,7 @@ fn game_row_action(
     }
     ui.add_enabled(
         available,
-        egui::Button::new(format!("{} Update", icons::SPARKLE)),
+        egui::Button::new(widgets::icon_text(icons::SPARKLE, "Update")),
     )
     .on_hover_text("Review and update this game's DLSS DLLs")
     .clicked()

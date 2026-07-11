@@ -50,8 +50,21 @@ pub(crate) fn sort_header(
     sort: GameSort,
 ) -> Option<GameSort> {
     let marker = sort_marker(key, sort);
-    let text = eframe::egui::RichText::new(format!("{label} {marker}")).strong();
+    let text = marker.map_or_else(
+        || eframe::egui::WidgetText::from(eframe::egui::RichText::new(label).strong()),
+        |marker| super::widgets::text_icon(label, marker),
+    );
+    let direction = if sort.key == key {
+        if sort.ascending {
+            "ascending; activate to sort descending"
+        } else {
+            "descending; activate to sort ascending"
+        }
+    } else {
+        "not sorted; activate to sort ascending"
+    };
     ui.add(eframe::egui::Button::new(text).frame(false))
+        .on_hover_text(format!("Sort by {label}: {direction}"))
         .clicked()
         .then(|| GameSort {
             key,
@@ -64,16 +77,16 @@ pub(crate) fn sort_header(
 }
 
 /// Sort direction glyphs from the bundled Phosphor icon font.
-fn sort_marker(key: SortKey, sort: GameSort) -> &'static str {
+fn sort_marker(key: SortKey, sort: GameSort) -> Option<&'static str> {
     use super::theme::icons;
     if sort.key == key {
         if sort.ascending {
-            icons::CARET_UP
+            Some(icons::CARET_UP)
         } else {
-            icons::CARET_DOWN
+            Some(icons::CARET_DOWN)
         }
     } else {
-        icons::CARET_UP_DOWN
+        None
     }
 }
 
@@ -188,7 +201,7 @@ mod tests {
             key: SortKey::Name,
             ascending: true,
         };
-        assert_eq!(sort_marker(SortKey::Name, active), icons::CARET_UP);
+        assert_eq!(sort_marker(SortKey::Name, active), Some(icons::CARET_UP));
         assert_eq!(
             sort_marker(
                 SortKey::Name,
@@ -197,8 +210,8 @@ mod tests {
                     ..active
                 }
             ),
-            icons::CARET_DOWN
+            Some(icons::CARET_DOWN)
         );
-        assert_eq!(sort_marker(SortKey::Store, active), icons::CARET_UP_DOWN);
+        assert_eq!(sort_marker(SortKey::Store, active), None);
     }
 }

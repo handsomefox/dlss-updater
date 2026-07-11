@@ -4,6 +4,56 @@ use super::inspector::{comparison_label, signature_label};
 use super::theme::{self, icons};
 use eframe::egui;
 
+pub(crate) fn icon_text(icon: &str, label: &str) -> egui::WidgetText {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        icon,
+        0.0,
+        egui::TextFormat {
+            font_id: theme::icon_font(15.0),
+            ..Default::default()
+        },
+    );
+    if !label.is_empty() {
+        job.append(
+            label,
+            5.0,
+            egui::TextFormat {
+                font_id: egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                ..Default::default()
+            },
+        );
+    }
+    job.into()
+}
+
+pub(crate) fn text_icon(label: &str, icon: &str) -> egui::WidgetText {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        label,
+        0.0,
+        egui::TextFormat {
+            font_id: egui::FontId::new(14.0, egui::FontFamily::Proportional),
+            ..Default::default()
+        },
+    );
+    job.append(
+        icon,
+        5.0,
+        egui::TextFormat {
+            font_id: theme::icon_font(11.0),
+            ..Default::default()
+        },
+    );
+    job.into()
+}
+
+pub(crate) fn icon(icon: &str, size: f32, color: egui::Color32) -> egui::RichText {
+    egui::RichText::new(icon)
+        .font(theme::icon_font(size))
+        .color(color)
+}
+
 /// Standard card surface: card background, hairline border, rounded corners.
 pub(crate) fn card<R>(
     ui: &mut egui::Ui,
@@ -34,7 +84,17 @@ pub(crate) fn badge(ui: &mut egui::Ui, text: impl Into<egui::RichText>, color: e
 /// Icon + short label in a tinted pill; the generic form behind the
 /// comparison and signature chips.
 pub(crate) fn chip(ui: &mut egui::Ui, icon: &str, label: &str, color: egui::Color32) {
-    badge(ui, format!("{icon} {label}"), color);
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.16))
+        .corner_radius(egui::CornerRadius::same(9))
+        .inner_margin(egui::Margin::symmetric(8, 2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                ui.label(self::icon(icon, 12.0, color));
+                ui.label(egui::RichText::new(label).color(color).size(11.5));
+            });
+        });
 }
 
 /// Comparison of an installed DLL against its best available target.
@@ -64,11 +124,7 @@ pub(crate) fn signature_chip(ui: &mut egui::Ui, status: dlss_core::SignatureStat
 /// Accent-colored icon next to a heading, for titling view sections.
 pub(crate) fn section_heading(ui: &mut egui::Ui, icon: &str, text: &str) {
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(icon)
-                .color(theme::ACCENT)
-                .text_style(egui::TextStyle::Heading),
-        );
+        ui.label(self::icon(icon, 19.0, theme::ACCENT));
         ui.heading(text);
     });
 }
@@ -91,7 +147,7 @@ pub(crate) fn banner(
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(icon).color(color));
+                ui.label(self::icon(icon, 15.0, color));
                 ui.add(
                     egui::Label::new(egui::RichText::new(message).color(color))
                         .wrap()
@@ -99,7 +155,10 @@ pub(crate) fn banner(
                 );
                 if dismissible {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        dismissed = ui.small_button(icons::X).clicked();
+                        dismissed = ui
+                            .add(egui::Button::new(self::icon(icons::X, 13.0, color)))
+                            .on_hover_text("Dismiss")
+                            .clicked();
                     });
                 }
             });

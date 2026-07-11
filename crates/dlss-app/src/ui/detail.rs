@@ -101,7 +101,7 @@ impl DlssApp {
         widgets::card(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui
-                    .button(format!("{} Library", icons::ARROW_LEFT))
+                    .button(widgets::icon_text(icons::ARROW_LEFT, "Library"))
                     .clicked()
                 {
                     *go_back = true;
@@ -114,11 +114,9 @@ impl DlssApp {
                         ui.label("Updating…");
                         return;
                     }
-                    let primary = egui::Button::new(
-                        egui::RichText::new(format!("{} Update DLSS", icons::SPARKLE))
-                            .color(egui::Color32::BLACK),
-                    )
-                    .fill(theme::ACCENT);
+                    let primary =
+                        egui::Button::new(widgets::icon_text(icons::SPARKLE, "Update DLSS"))
+                            .fill(theme::ACCENT);
                     if ui
                         .add_enabled(can_update, primary)
                         .on_hover_text("Review and update this game's DLSS DLLs")
@@ -129,7 +127,7 @@ impl DlssApp {
                     if ui
                         .add_enabled(
                             can_update,
-                            egui::Button::new(format!("{} All DLLs", icons::STACK)),
+                            egui::Button::new(widgets::icon_text(icons::STACK, "All DLLs")),
                         )
                         .on_hover_text(
                             "Review updates for every managed DLL, including Streamline and Reflex",
@@ -140,7 +138,10 @@ impl DlssApp {
                     }
                     if can_undo
                         && ui
-                            .button(format!("{} Undo last change", icons::ARROW_U_UP_LEFT))
+                            .button(widgets::icon_text(
+                                icons::ARROW_U_UP_LEFT,
+                                "Undo last change",
+                            ))
                             .clicked()
                     {
                         *undo = true;
@@ -235,7 +236,7 @@ impl DlssApp {
                 .selectable(true),
             );
             ui.collapsing(
-                format!("{} Advanced target", icons::SLIDERS_HORIZONTAL),
+                widgets::icon_text(icons::SLIDERS_HORIZONTAL, "Advanced target"),
                 |ui| {
                     self.desired_target_combo(ui, dll);
                     ui.weak(
@@ -355,7 +356,7 @@ impl DlssApp {
     pub(crate) fn staged_ribbon(&mut self, ui: &mut egui::Ui, game_id: &dlss_core::GameId) {
         let staged = self.staged_targets_for(game_id);
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(icons::LIST_CHECKS).color(theme::ACCENT));
+            ui.label(widgets::icon(icons::LIST_CHECKS, 15.0, theme::ACCENT));
             ui.strong(format!(
                 "{staged} staged DLL {}",
                 if staged == 1 { "change" } else { "changes" }

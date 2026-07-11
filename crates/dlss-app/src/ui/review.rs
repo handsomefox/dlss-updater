@@ -391,7 +391,7 @@ fn review_row(ui: &mut egui::Ui, row: &mut ReviewRow) {
     ui.horizontal(|ui| {
         ui.checkbox(&mut row.checked, "");
         let kind = dlss_core::DllKind::classify(&row.file_name);
-        ui.label(egui::RichText::new(dll_kind_icon(kind)).color(theme::ACCENT));
+        ui.label(widgets::icon(dll_kind_icon(kind), 15.0, theme::ACCENT));
         ui.label(dlss_core::friendly_dll_label(&row.file_name));
         ui.monospace(format!(
             "{} {} {}",

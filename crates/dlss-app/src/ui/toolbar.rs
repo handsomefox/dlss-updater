@@ -16,21 +16,30 @@ impl DlssApp {
                 ui.weak("Loading catalog");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(format!("{} Tools", icons::WRENCH)).clicked() {
+                if ui
+                    .button(widgets::icon_text(icons::WRENCH, "Tools"))
+                    .clicked()
+                {
                     self.open_windows.insert(super::super::AppWindow::Tools);
                     self.refresh_tool_state();
                 }
-                if ui.button(format!("{} Releases", icons::PACKAGE)).clicked() {
+                if ui
+                    .button(widgets::icon_text(icons::PACKAGE, "Releases"))
+                    .clicked()
+                {
                     self.open_windows.insert(super::super::AppWindow::Releases);
                 }
                 if ui
-                    .button(format!("{} Activity", icons::CLOCK_COUNTER_CLOCKWISE))
+                    .button(widgets::icon_text(
+                        icons::CLOCK_COUNTER_CLOCKWISE,
+                        "Activity",
+                    ))
                     .clicked()
                 {
                     self.open_windows.insert(super::super::AppWindow::Activity);
                 }
                 if ui
-                    .button(format!("{} Game folders", icons::FOLDER_SIMPLE))
+                    .button(widgets::icon_text(icons::FOLDER_SIMPLE, "Game folders"))
                     .clicked()
                 {
                     self.open_windows.insert(super::super::AppWindow::Roots);
@@ -51,9 +60,9 @@ impl DlssApp {
         ui.horizontal(|ui| {
             ui.add_sized(
                 [ui.available_width().min(340.0), 28.0],
-                egui::TextEdit::singleline(&mut self.filter).hint_text(format!(
-                    "{} Search games and stores…",
-                    icons::MAGNIFYING_GLASS
+                egui::TextEdit::singleline(&mut self.filter).hint_text(widgets::icon_text(
+                    icons::MAGNIFYING_GLASS,
+                    "Search games and stores…",
                 )),
             );
             egui::ComboBox::from_id_salt("game_filter")
@@ -95,7 +104,7 @@ impl DlssApp {
             if ui
                 .add_enabled(
                     !self.runtime.scanning,
-                    egui::Button::new(format!("{} Rescan", icons::ARROW_CLOCKWISE)),
+                    egui::Button::new(widgets::icon_text(icons::ARROW_CLOCKWISE, "Rescan")),
                 )
                 .clicked()
             {
@@ -112,7 +121,7 @@ impl DlssApp {
             if ui
                 .add_enabled(
                     quick_ready,
-                    egui::Button::new(format!("{} Quick update DLSS", icons::SPARKLE)),
+                    egui::Button::new(widgets::icon_text(icons::SPARKLE, "Quick update DLSS")),
                 )
                 .clicked()
             {

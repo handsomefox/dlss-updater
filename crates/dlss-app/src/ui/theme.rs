@@ -6,6 +6,12 @@
 
 use eframe::egui;
 
+pub(crate) const ICON_FAMILY_NAME: &str = "phosphor-icons";
+
+pub(crate) fn icon_font(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name(ICON_FAMILY_NAME.into()))
+}
+
 // Layered backgrounds, darkest (app chrome) to lightest (interactive widgets).
 pub(crate) const BG_APP: egui::Color32 = egui::Color32::from_rgb(0x0E, 0x11, 0x16);
 pub(crate) const BG_PANEL: egui::Color32 = egui::Color32::from_rgb(0x15, 0x1A, 0x21);
@@ -138,16 +144,18 @@ fn font_definitions() -> egui::FontDefinitions {
         .entry(egui::FontFamily::Proportional)
         .or_default();
     proportional.insert(0, "inter".into());
-    proportional.insert(1, "phosphor".into());
     let monospace = fonts
         .families
         .entry(egui::FontFamily::Monospace)
         .or_default();
     monospace.insert(0, "jetbrains-mono".into());
-    monospace.insert(1, "phosphor".into());
     fonts.families.insert(
         egui::FontFamily::Name("semibold".into()),
-        vec!["inter-semibold".into(), "phosphor".into()],
+        vec!["inter-semibold".into()],
+    );
+    fonts.families.insert(
+        egui::FontFamily::Name(ICON_FAMILY_NAME.into()),
+        vec!["phosphor".into()],
     );
     fonts
 }
@@ -165,7 +173,6 @@ pub(crate) mod icons {
     pub(crate) const ARROW_U_UP_LEFT: &str = "\u{E08A}";
     pub(crate) const CARET_DOWN: &str = "\u{E136}";
     pub(crate) const CARET_UP: &str = "\u{E13C}";
-    pub(crate) const CARET_UP_DOWN: &str = "\u{E140}";
     pub(crate) const CHECK_CIRCLE: &str = "\u{E184}";
     pub(crate) const CIRCLE: &str = "\u{E18A}";
     pub(crate) const CLOCK_COUNTER_CLOCKWISE: &str = "\u{E1A0}";
