@@ -205,6 +205,7 @@ fn extract_to_staging(
             || !parts[0].eq_ignore_ascii_case("bin")
             || !parts[1].eq_ignore_ascii_case("x64")
             || !parts[2].to_ascii_lowercase().ends_with(".dll")
+            || parts[2].eq_ignore_ascii_case("NvLowLatencyVk.dll")
         {
             continue;
         }
@@ -623,6 +624,26 @@ mod tests {
             &Trust(true),
         );
         assert!(matches!(wrong_arch, Err(CatalogError::InvalidPe(_))));
+    }
+
+    #[test]
+    fn ignores_nv_low_latency_vk_candidate() {
+        let (directory, path) = archive(&[
+            ("bin/x64/NvLowLatencyVk.DLL", b"x86-binary"),
+            ("bin/x64/nvngx_dlss.dll", b"trusted"),
+        ]);
+        let output = directory.path().join("output");
+        let dlls = validate_and_extract(
+            &path,
+            &output,
+            &ReleaseId("r".into()),
+            &Inspector,
+            &Trust(true),
+        )
+        .unwrap();
+        assert_eq!(dlls.dlls.len(), 1);
+        assert_eq!(dlls.dlls[0].file_name, "nvngx_dlss.dll");
+        assert!(!output.join("NvLowLatencyVk.DLL").exists());
     }
 
     #[test]
