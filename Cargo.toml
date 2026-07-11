@@ -3,7 +3,7 @@ members = ["crates/dlss-core", "crates/dlss-catalog", "crates/dlss-platform", "c
 resolver = "3"
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/handsomefox/dlss-updater"
