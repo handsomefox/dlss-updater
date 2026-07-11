@@ -34,7 +34,6 @@ pub(crate) enum Command {
     RefreshCatalog,
     InspectRelease(ReleaseId),
     RemoveRelease(ReleaseId),
-    UpgradeLatest(GameId, UpgradeScope),
     ApplyProfile(GameId, TargetProfile),
     UndoLast(GameId),
     AddRoot(PathBuf),
@@ -43,12 +42,6 @@ pub(crate) enum Command {
     #[cfg(windows)]
     ChangeIndicator(IndicatorRequest),
     Shutdown,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) enum UpgradeScope {
-    AllManaged,
-    DlssOnly,
 }
 
 /// A prepared request to change the DLSS indicator. The caller performs the
@@ -197,7 +190,6 @@ fn command_name(command: &Command) -> &'static str {
         Command::RefreshCatalog => "refresh_catalog",
         Command::InspectRelease(_) => "inspect_release",
         Command::RemoveRelease(_) => "remove_release",
-        Command::UpgradeLatest(_, _) => "upgrade_latest",
         Command::ApplyProfile(_, _) => "apply_profile",
         Command::UndoLast(_) => "undo_last",
         Command::AddRoot(_) => "add_root",
@@ -220,7 +212,6 @@ fn dispatch(command: Command, events: &EventSink, state: &mut WorkerState) -> bo
         ),
         Command::InspectRelease(id) => inspect_release_command(id, events, state),
         Command::RemoveRelease(id) => remove_release_command(id, events, state),
-        Command::UpgradeLatest(id, scope) => upgrade_command(id, scope, events, state),
         Command::ApplyProfile(id, profile) => profile_command(id, &profile, events, state),
         Command::UndoLast(id) => undo_command(id, events, state),
         Command::AddRoot(root) => add_root_command(&root, events, state),
@@ -312,27 +303,6 @@ fn remove_release_files(_id: &ReleaseId) -> WorkerResult<()> {
     Err(WorkerError::Unavailable(
         "Release downloads are available only in Windows builds",
     ))
-}
-
-fn upgrade_command(id: GameId, scope: UpgradeScope, events: &EventSink, state: &mut WorkerState) {
-    let Some(game) = begin_game_operation(&id, events, state) else {
-        return;
-    };
-    let progress_events = events.clone();
-    let result = latest_asset(&state.assets)
-        .ok_or_else(|| WorkerError::State("official release metadata is not available".into()))
-        .and_then(|asset| {
-            let release_id = asset.release.id.clone();
-            upgrade_game(&game, asset, scope, |release_state, received, total| {
-                progress_events.send(Event::ReleaseProgress {
-                    id: release_id.clone(),
-                    state: release_state,
-                    received,
-                    total,
-                });
-            })
-        });
-    finish_game_operation(id, game, result, events, state);
 }
 
 fn profile_command(
@@ -746,25 +716,6 @@ fn inspect_release(
 }
 
 #[cfg(windows)]
-fn upgrade_game(
-    game: &GameInstall,
-    asset: &OfficialAsset,
-    scope: UpgradeScope,
-    progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
-) -> WorkerResult<UpgradeReport> {
-    let (base, catalog_dlls) = prepare_release(asset, progress)?;
-    let plan = match scope {
-        UpgradeScope::AllManaged => {
-            dlss_core::plan_strict_upgrades(operation_nonce(), &game.dlls, &catalog_dlls)
-        }
-        UpgradeScope::DlssOnly => {
-            dlss_core::plan_dlss_only_upgrades(operation_nonce(), &game.dlls, &catalog_dlls)
-        }
-    };
-    Ok(execute_game_plan(game, asset, &base, &plan))
-}
-
-#[cfg(windows)]
 fn apply_profile(
     game: &GameInstall,
     asset: &OfficialAsset,
@@ -1089,18 +1040,6 @@ fn undo_game(_game: &GameInstall, plan: &dlss_core::OperationPlan) -> WorkerResu
         warning: None,
         undo_plan: None,
     })
-}
-
-#[cfg(not(windows))]
-fn upgrade_game(
-    _game: &GameInstall,
-    _asset: &OfficialAsset,
-    _scope: UpgradeScope,
-    _progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
-) -> WorkerResult<UpgradeReport> {
-    Err(WorkerError::Unavailable(
-        "DLL replacement is available only in Windows builds",
-    ))
 }
 
 #[cfg(not(windows))]

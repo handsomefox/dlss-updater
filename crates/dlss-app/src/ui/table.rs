@@ -49,8 +49,9 @@ pub(crate) fn sort_header(
     key: SortKey,
     sort: GameSort,
 ) -> Option<GameSort> {
-    let suffix = sort_suffix(key, sort);
-    ui.button(format!("{label}{suffix}"))
+    let marker = sort_marker(key, sort);
+    let text = eframe::egui::RichText::new(format!("{label} {marker}")).strong();
+    ui.add(eframe::egui::Button::new(text).frame(false))
         .clicked()
         .then(|| GameSort {
             key,
@@ -62,11 +63,17 @@ pub(crate) fn sort_header(
         })
 }
 
-fn sort_suffix(key: SortKey, sort: GameSort) -> &'static str {
+/// Sort direction glyphs from the bundled Phosphor icon font.
+fn sort_marker(key: SortKey, sort: GameSort) -> &'static str {
+    use super::theme::icons;
     if sort.key == key {
-        if sort.ascending { " [asc]" } else { " [desc]" }
+        if sort.ascending {
+            icons::CARET_UP
+        } else {
+            icons::CARET_DOWN
+        }
     } else {
-        " [sort]"
+        icons::CARET_UP_DOWN
     }
 }
 
@@ -175,22 +182,23 @@ mod tests {
     }
 
     #[test]
-    fn sort_markers_use_font_safe_ascii() {
+    fn sort_markers_show_direction_with_bundled_icons() {
+        use crate::ui::theme::icons;
         let active = GameSort {
             key: SortKey::Name,
             ascending: true,
         };
-        assert_eq!(sort_suffix(SortKey::Name, active), " [asc]");
+        assert_eq!(sort_marker(SortKey::Name, active), icons::CARET_UP);
         assert_eq!(
-            sort_suffix(
+            sort_marker(
                 SortKey::Name,
                 GameSort {
                     ascending: false,
                     ..active
                 }
             ),
-            " [desc]"
+            icons::CARET_DOWN
         );
-        assert_eq!(sort_suffix(SortKey::Store, active), " [sort]");
+        assert_eq!(sort_marker(SortKey::Store, active), icons::CARET_UP_DOWN);
     }
 }

@@ -1,4 +1,9 @@
+pub(crate) mod detail;
 pub(crate) mod inspector;
+pub(crate) mod library;
+pub(crate) mod review;
 pub(crate) mod table;
+pub(crate) mod theme;
 pub(crate) mod toolbar;
+pub(crate) mod widgets;
 pub(crate) mod windows;

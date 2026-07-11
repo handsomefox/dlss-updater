@@ -1,3 +1,6 @@
+use super::theme::{self, icons};
+use super::widgets;
+use crate::ui::review::ReviewIntent;
 use crate::{Command, DlssApp, GameFilter, StoreFilter};
 use dlss_core::SystemToolState;
 use eframe::egui;
@@ -7,30 +10,36 @@ impl DlssApp {
         ui.horizontal(|ui| {
             ui.heading("DLSS Updater");
             if let Some(release) = &self.catalog_release {
-                ui.weak(format!("Official {release}"));
+                widgets::badge(ui, format!("Official {release}"), theme::ACCENT);
             } else if self.runtime.catalog_loading {
                 ui.spinner();
                 ui.weak("Loading catalog");
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button("Tools").clicked() {
+                if ui.button(format!("{} Tools", icons::WRENCH)).clicked() {
                     self.open_windows.insert(super::super::AppWindow::Tools);
                     self.refresh_tool_state();
                 }
-                if ui.button("Releases").clicked() {
+                if ui.button(format!("{} Releases", icons::PACKAGE)).clicked() {
                     self.open_windows.insert(super::super::AppWindow::Releases);
                 }
-                if ui.button("Activity").clicked() {
+                if ui
+                    .button(format!("{} Activity", icons::CLOCK_COUNTER_CLOCKWISE))
+                    .clicked()
+                {
                     self.open_windows.insert(super::super::AppWindow::Activity);
                 }
-                if ui.button("Game folders").clicked() {
+                if ui
+                    .button(format!("{} Game folders", icons::FOLDER_SIMPLE))
+                    .clicked()
+                {
                     self.open_windows.insert(super::super::AppWindow::Roots);
                 }
                 if matches!(
                     self.tool_state,
                     SystemToolState::DlssIndicatorDebug | SystemToolState::DlssIndicatorProduction
                 ) {
-                    ui.colored_label(egui::Color32::YELLOW, "● Indicator active");
+                    widgets::chip(ui, icons::CIRCLE, "Indicator active", theme::WARNING);
                 }
             });
         });
@@ -42,7 +51,10 @@ impl DlssApp {
         ui.horizontal(|ui| {
             ui.add_sized(
                 [ui.available_width().min(340.0), 28.0],
-                egui::TextEdit::singleline(&mut self.filter).hint_text("Search games and stores…"),
+                egui::TextEdit::singleline(&mut self.filter).hint_text(format!(
+                    "{} Search games and stores…",
+                    icons::MAGNIFYING_GLASS
+                )),
             );
             egui::ComboBox::from_id_salt("game_filter")
                 .selected_text(match self.filter_mode {
@@ -81,7 +93,10 @@ impl DlssApp {
                     ui.selectable_value(&mut self.store_filter, StoreFilter::Manual, "Manual");
                 });
             if ui
-                .add_enabled(!self.runtime.scanning, egui::Button::new("Rescan"))
+                .add_enabled(
+                    !self.runtime.scanning,
+                    egui::Button::new(format!("{} Rescan", icons::ARROW_CLOCKWISE)),
+                )
                 .clicked()
             {
                 let _ = self.worker.commands.send(Command::Scan);
@@ -95,16 +110,19 @@ impl DlssApp {
                 && self.upgrading.is_none()
                 && self.games.iter().any(|game| game.dlls > 0);
             if ui
-                .add_enabled(quick_ready, egui::Button::new("Quick update DLSS"))
+                .add_enabled(
+                    quick_ready,
+                    egui::Button::new(format!("{} Quick update DLSS", icons::SPARKLE)),
+                )
                 .clicked()
             {
-                self.review = Some(super::super::ReviewKind::QuickDlss(
-                    self.games
-                        .iter()
-                        .filter(|game| game.dlls > 0)
-                        .map(|game| game.id.clone())
-                        .collect(),
-                ));
+                let ids = self
+                    .games
+                    .iter()
+                    .filter(|game| game.dlls > 0)
+                    .map(|game| game.id.clone())
+                    .collect();
+                self.open_review(ReviewIntent::QuickDlss(ids));
             }
             if let Some(report) = self.discovery_reports.iter().find(|report| {
                 report.games_found == 0
@@ -113,13 +131,16 @@ impl DlssApp {
                         dlss_core::DiscoveryStatus::NotDetected | dlss_core::DiscoveryStatus::Error
                     )
             }) {
-                ui.colored_label(egui::Color32::YELLOW, "Store warning")
-                    .on_hover_text(
-                        report
-                            .detail
-                            .as_deref()
-                            .unwrap_or("A store was not detected"),
-                    );
+                ui.scope(|ui| {
+                    widgets::chip(ui, icons::WARNING, "Store warning", theme::WARNING);
+                })
+                .response
+                .on_hover_text(
+                    report
+                        .detail
+                        .as_deref()
+                        .unwrap_or("A store was not detected"),
+                );
             }
         });
     }
