@@ -155,7 +155,7 @@ fn font_definitions() -> egui::FontDefinitions {
     );
     fonts.families.insert(
         egui::FontFamily::Name(ICON_FAMILY_NAME.into()),
-        vec!["phosphor".into()],
+        vec!["phosphor".into(), "inter".into()],
     );
     fonts
 }
