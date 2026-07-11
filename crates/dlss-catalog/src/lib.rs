@@ -1,6 +1,9 @@
 //! Validated, constrained Streamline archive ingestion.
 
-use dlss_core::{CatalogDll, DllInspector, ReleaseId, SignatureStatus, TrustVerifier};
+use dlss_core::{
+    CatalogDll, DllInspector, ReleaseId, ReleaseValidation, RevocationStatus, SignatureStatus,
+    TrustPolicy, TrustVerifier,
+};
 use sha2::{Digest, Sha256};
 
 mod github;
@@ -14,6 +17,11 @@ use std::{
 };
 
 static STAGING_NONCE: AtomicU64 = AtomicU64::new(0);
+
+enum CandidateTrust {
+    Accepted { revocation_fallback: bool },
+    Rejected(String),
+}
 
 pub const CATALOG_SCHEMA_VERSION: u32 = 1;
 
@@ -87,6 +95,14 @@ pub enum CatalogError {
     Inspection(String, String),
     #[error("archive contains no immediate production x86-64 DLLs")]
     NoProductionDlls,
+    #[error("production DLL validation failed: {0}")]
+    RejectedCandidates(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValidatedRelease {
+    pub dlls: Vec<CatalogDll>,
+    pub validation: ReleaseValidation,
 }
 
 /// Extracts only immediate production DLLs in `bin/x64`, never development DLLs.
@@ -100,7 +116,7 @@ pub fn validate_and_extract(
     release: &ReleaseId,
     inspector: &dyn DllInspector,
     trust: &dyn TrustVerifier,
-) -> Result<Vec<CatalogDll>, CatalogError> {
+) -> Result<ValidatedRelease, CatalogError> {
     let parent = destination.parent().ok_or_else(|| {
         CatalogError::Io(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -145,7 +161,7 @@ pub fn validate_and_extract(
         let _ = fs::remove_dir_all(&staging);
         return Err(error.into());
     }
-    for dll in &mut extracted {
+    for dll in &mut extracted.dlls {
         dll.source = destination.join(&dll.file_name);
     }
     Ok(extracted)
@@ -157,7 +173,7 @@ fn extract_to_staging(
     release: &ReleaseId,
     inspector: &dyn DllInspector,
     trust: &dyn TrustVerifier,
-) -> Result<Vec<CatalogDll>, CatalogError> {
+) -> Result<ValidatedRelease, CatalogError> {
     if archive.metadata()?.len() > MAX_ARCHIVE_BYTES {
         return Err(CatalogError::TooLarge);
     }
@@ -168,6 +184,8 @@ fn extract_to_staging(
     fs::create_dir_all(destination)?;
     let mut names = HashSet::new();
     let mut extracted = Vec::new();
+    let mut rejections = Vec::new();
+    let mut used_revocation_fallback = false;
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index)?;
         let raw_name = entry.name().replace('\\', "/");
@@ -198,25 +216,7 @@ fn extract_to_staging(
         // selection can reject an otherwise valid PE when staged as
         // `*.dll.partial`.
         let temporary = destination.join(format!(".partial-{}", parts[2]));
-        let mut file = File::create(&temporary)?;
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0_u8; 64 * 1024];
-        let mut written = 0_u64;
-        loop {
-            let count = entry.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            written += count as u64;
-            if written > MAX_DLL_BYTES {
-                let _ = fs::remove_file(&temporary);
-                return Err(CatalogError::TooLarge);
-            }
-            hasher.update(&buffer[..count]);
-            file.write_all(&buffer[..count])?;
-        }
-        file.flush()?;
-        file.sync_all()?;
+        let sha256 = copy_staged_candidate(&mut entry, &temporary)?;
         let metadata = inspector
             .inspect(&temporary)
             .map_err(|e| CatalogError::Inspection(parts[2].into(), e.to_string()))?;
@@ -224,17 +224,15 @@ fn extract_to_staging(
             let _ = fs::remove_file(&temporary);
             return Err(CatalogError::InvalidPe(parts[2].into()));
         }
-        if trust
-            .verify(&temporary)
-            .map_err(|e| CatalogError::Inspection(parts[2].into(), e.to_string()))?
-            != SignatureStatus::Trusted
-        {
-            let _ = fs::remove_file(&temporary);
-            tracing::warn!(
-                dll = parts[2],
-                "skipping production DLL with an untrusted signature"
-            );
-            continue;
+        match verify_catalog_candidate(&temporary, parts[2], trust)? {
+            CandidateTrust::Accepted {
+                revocation_fallback,
+            } => used_revocation_fallback |= revocation_fallback,
+            CandidateTrust::Rejected(reason) => {
+                let _ = fs::remove_file(&temporary);
+                rejections.push(reason);
+                continue;
+            }
         }
         let Some(version) = metadata.version else {
             let _ = fs::remove_file(&temporary);
@@ -247,15 +245,89 @@ fn extract_to_staging(
         extracted.push(CatalogDll {
             file_name: parts[2].into(),
             version,
-            sha256: hasher.finalize().into(),
+            sha256,
             source: output,
             release: release.clone(),
         });
     }
     if extracted.is_empty() {
-        return Err(CatalogError::NoProductionDlls);
+        return if rejections.is_empty() {
+            Err(CatalogError::NoProductionDlls)
+        } else {
+            Err(CatalogError::RejectedCandidates(rejections.join("; ")))
+        };
     }
-    Ok(extracted)
+    if !rejections.is_empty() {
+        tracing::warn!(rejections = %rejections.join("; "), "some production DLL candidates were rejected");
+    }
+    Ok(ValidatedRelease {
+        dlls: extracted,
+        validation: if used_revocation_fallback {
+            ReleaseValidation::RevocationUnavailableFallback
+        } else {
+            ReleaseValidation::Full
+        },
+    })
+}
+
+fn copy_staged_candidate(reader: &mut impl Read, path: &Path) -> Result<[u8; 32], CatalogError> {
+    let mut file = File::create(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut written = 0_u64;
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        written += count as u64;
+        if written > MAX_DLL_BYTES {
+            drop(file);
+            let _ = fs::remove_file(path);
+            return Err(CatalogError::TooLarge);
+        }
+        hasher.update(&buffer[..count]);
+        file.write_all(&buffer[..count])?;
+    }
+    file.flush()?;
+    file.sync_all()?;
+    drop(file);
+    Ok(hasher.finalize().into())
+}
+
+fn verify_catalog_candidate(
+    path: &Path,
+    name: &str,
+    trust: &dyn TrustVerifier,
+) -> Result<CandidateTrust, CatalogError> {
+    let report = trust
+        .verify(path, TrustPolicy::OfficialNvidiaCatalog)
+        .map_err(|error| CatalogError::Inspection(name.into(), error.to_string()))?;
+    if report.signature == SignatureStatus::Trusted
+        && report
+            .signer
+            .as_deref()
+            .is_some_and(dlss_core::is_nvidia_signer)
+    {
+        return Ok(CandidateTrust::Accepted {
+            revocation_fallback: report.revocation == RevocationStatus::UnavailableFallback,
+        });
+    }
+    let native = report.native_failure.as_ref().map_or_else(
+        || "no native status".into(),
+        |failure| {
+            format!(
+                "0x{:08X}: {}",
+                failure.status.cast_unsigned(),
+                failure.reason
+            )
+        },
+    );
+    Ok(CandidateTrust::Rejected(format!(
+        "{name}: signature={:?}, signer={}, {native}",
+        report.signature,
+        report.signer.as_deref().unwrap_or("unknown")
+    )))
 }
 
 pub(crate) fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
@@ -268,7 +340,7 @@ pub(crate) fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dlss_core::{CoreError, DllMetadata, DllVersion};
+    use dlss_core::{CoreError, DllMetadata, DllVersion, TrustReport};
     use std::io::Write;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -294,39 +366,86 @@ mod tests {
 
     struct Trust(bool);
     impl TrustVerifier for Trust {
-        fn verify(&self, _path: &Path) -> Result<SignatureStatus, CoreError> {
-            Ok(if self.0 {
+        fn verify(&self, _path: &Path, _policy: TrustPolicy) -> Result<TrustReport, CoreError> {
+            let signature = if self.0 {
                 SignatureStatus::Trusted
             } else {
                 SignatureStatus::Untrusted
+            };
+            Ok(TrustReport {
+                signature,
+                signer: self.0.then(|| "NVIDIA Corporation".into()),
+                revocation: if self.0 {
+                    RevocationStatus::Verified
+                } else {
+                    RevocationStatus::NotVerified
+                },
+                native_failure: None,
             })
         }
     }
 
     struct TrustByContents;
     impl TrustVerifier for TrustByContents {
-        fn verify(&self, path: &Path) -> Result<SignatureStatus, CoreError> {
-            Ok(if fs::read(path)? == b"untrusted" {
-                SignatureStatus::Untrusted
-            } else {
-                SignatureStatus::Trusted
+        fn verify(&self, path: &Path, _policy: TrustPolicy) -> Result<TrustReport, CoreError> {
+            let trusted = fs::read(path)? != b"untrusted";
+            Ok(TrustReport {
+                signature: if trusted {
+                    SignatureStatus::Trusted
+                } else {
+                    SignatureStatus::Untrusted
+                },
+                signer: trusted.then(|| "NVIDIA Corporation".into()),
+                revocation: if trusted {
+                    RevocationStatus::Verified
+                } else {
+                    RevocationStatus::NotVerified
+                },
+                native_failure: None,
             })
         }
     }
 
     struct TrustRequiresDllExtension;
     impl TrustVerifier for TrustRequiresDllExtension {
-        fn verify(&self, path: &Path) -> Result<SignatureStatus, CoreError> {
-            Ok(
-                if path
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
-                {
+        fn verify(&self, path: &Path, _policy: TrustPolicy) -> Result<TrustReport, CoreError> {
+            let trusted = path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"));
+            Ok(TrustReport {
+                signature: if trusted {
                     SignatureStatus::Trusted
                 } else {
                     SignatureStatus::Untrusted
                 },
-            )
+                signer: trusted.then(|| "NVIDIA Corporation".into()),
+                revocation: RevocationStatus::Verified,
+                native_failure: None,
+            })
+        }
+    }
+
+    struct ReportTrust {
+        signature: SignatureStatus,
+        signer: Option<&'static str>,
+        revocation: RevocationStatus,
+        native_status: Option<i32>,
+    }
+
+    impl TrustVerifier for ReportTrust {
+        fn verify(&self, _path: &Path, policy: TrustPolicy) -> Result<TrustReport, CoreError> {
+            assert_eq!(policy, TrustPolicy::OfficialNvidiaCatalog);
+            Ok(TrustReport {
+                signature: self.signature,
+                signer: self.signer.map(str::to_owned),
+                revocation: self.revocation,
+                native_failure: self
+                    .native_status
+                    .map(|status| dlss_core::NativeTrustFailure {
+                        status,
+                        reason: "test trust failure".into(),
+                    }),
+            })
         }
     }
 
@@ -362,9 +481,79 @@ mod tests {
             &Trust(true),
         )
         .unwrap();
-        assert_eq!(dlls.len(), 1);
-        assert_eq!(dlls[0].file_name, "sl.common.dll");
+        assert_eq!(dlls.dlls.len(), 1);
+        assert_eq!(dlls.dlls[0].file_name, "sl.common.dll");
         assert_eq!(fs::read(output.join("sl.common.dll")).unwrap(), b"pe64");
+    }
+
+    #[test]
+    fn enforces_nvidia_signer_and_aggregates_native_rejections() {
+        let (directory, path) = archive(&[
+            ("bin/x64/sl.one.dll", b"one"),
+            ("bin/x64/sl.two.dll", b"two"),
+        ]);
+        let result = validate_and_extract(
+            &path,
+            &directory.path().join("output"),
+            &ReleaseId("r".into()),
+            &Inspector,
+            &ReportTrust {
+                signature: SignatureStatus::Untrusted,
+                signer: Some("Example Publisher"),
+                revocation: RevocationStatus::NotVerified,
+                native_status: Some(0x800B_0109_u32.cast_signed()),
+            },
+        );
+        let Err(CatalogError::RejectedCandidates(message)) = result else {
+            panic!("unexpected validation result: {result:?}");
+        };
+        assert!(message.contains("sl.one.dll"));
+        assert!(message.contains("sl.two.dll"));
+        assert!(message.contains("0x800B0109"));
+        assert!(message.contains("Example Publisher"));
+    }
+
+    #[test]
+    fn records_offline_revocation_fallback_as_a_warning_quality() {
+        let (directory, path) = archive(&[("bin/x64/sl.common.dll", b"valid")]);
+        let validated = validate_and_extract(
+            &path,
+            &directory.path().join("output"),
+            &ReleaseId("r".into()),
+            &Inspector,
+            &ReportTrust {
+                signature: SignatureStatus::Trusted,
+                signer: Some("NVIDIA Corporation"),
+                revocation: RevocationStatus::UnavailableFallback,
+                native_status: Some(0x8009_2013_u32.cast_signed()),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            validated.validation,
+            ReleaseValidation::RevocationUnavailableFallback
+        );
+    }
+
+    #[test]
+    fn trusted_non_nvidia_publisher_is_rejected() {
+        let (directory, path) = archive(&[("bin/x64/sl.common.dll", b"valid")]);
+        let result = validate_and_extract(
+            &path,
+            &directory.path().join("output"),
+            &ReleaseId("r".into()),
+            &Inspector,
+            &ReportTrust {
+                signature: SignatureStatus::Trusted,
+                signer: Some("Example Publisher"),
+                revocation: RevocationStatus::Verified,
+                native_status: None,
+            },
+        );
+        let Err(CatalogError::RejectedCandidates(message)) = result else {
+            panic!("unexpected validation result: {result:?}");
+        };
+        assert!(message.contains("Example Publisher"));
     }
 
     #[test]
@@ -420,7 +609,10 @@ mod tests {
             &Inspector,
             &Trust(false),
         );
-        assert!(matches!(untrusted, Err(CatalogError::NoProductionDlls)));
+        assert!(matches!(
+            untrusted,
+            Err(CatalogError::RejectedCandidates(_))
+        ));
 
         let (directory, path) = archive(&[("bin/x64/sl.common.dll", b"x86-binary")]);
         let wrong_arch = validate_and_extract(
@@ -448,8 +640,8 @@ mod tests {
             &TrustByContents,
         )
         .unwrap();
-        assert_eq!(dlls.len(), 1);
-        assert_eq!(dlls[0].file_name, "nvngx_dlss.dll");
+        assert_eq!(dlls.dlls.len(), 1);
+        assert_eq!(dlls.dlls[0].file_name, "nvngx_dlss.dll");
         assert!(!output.join("NvLowLatencyVk.dll").exists());
     }
 
@@ -465,7 +657,7 @@ mod tests {
             &TrustRequiresDllExtension,
         )
         .unwrap();
-        assert_eq!(dlls.len(), 1);
+        assert_eq!(dlls.dlls.len(), 1);
         assert!(output.join("nvngx_dlss.dll").exists());
     }
 
@@ -517,8 +709,8 @@ mod tests {
         .unwrap();
 
         assert!(!output.join("stale.dll").exists());
-        assert_eq!(dlls[0].source, output.join("sl.common.dll"));
-        assert!(dlls[0].source.exists());
+        assert_eq!(dlls.dlls[0].source, output.join("sl.common.dll"));
+        assert!(dlls.dlls[0].source.exists());
     }
 
     #[test]
@@ -571,5 +763,37 @@ mod tests {
         let loaded = CatalogCacheIndex::load(&path).unwrap();
         assert_eq!(loaded.etag, index.etag);
         assert_eq!(loaded.assets, index.assets);
+    }
+
+    #[test]
+    fn legacy_ready_release_shape_requires_revalidation() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("catalog.json");
+        fs::write(
+            &path,
+            r#"{
+                "schema_version": 1,
+                "payload": {
+                    "etag": null,
+                    "assets": [],
+                    "releases": [{
+                        "metadata": {
+                            "id": "v1",
+                            "tag": "v1",
+                            "asset_name": "streamline-sdk-v1.zip",
+                            "published_unix": 0
+                        },
+                        "state": "Ready",
+                        "dlls": []
+                    }]
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(CatalogCacheIndex::load(&path).is_err());
+        assert!(
+            path.exists(),
+            "schema invalidation must not remove cached artifacts"
+        );
     }
 }

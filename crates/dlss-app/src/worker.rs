@@ -590,6 +590,7 @@ fn catalog_snapshot(assets: &[OfficialAsset], catalog: &CatalogCacheIndex) -> Ca
                     metadata: asset.release.clone(),
                     state: dlss_core::ReleaseState::MetadataOnly,
                     dlls: Vec::new(),
+                    validation: dlss_core::ReleaseValidation::Full,
                 })
         })
         .collect();
@@ -697,11 +698,12 @@ fn inspect_release(
     asset: &OfficialAsset,
     progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<dlss_core::CachedRelease> {
-    let (_, dlls) = prepare_release(asset, progress)?;
+    let (_, validated) = prepare_release(asset, progress)?;
     Ok(dlss_core::CachedRelease {
         metadata: asset.release.clone(),
         state: dlss_core::ReleaseState::Ready,
-        dlls,
+        dlls: validated.dlls,
+        validation: validated.validation,
     })
 }
 
@@ -728,7 +730,7 @@ fn apply_profile(
     let plan = dlss_core::plan_target_profile(
         operation_nonce(),
         &game.dlls,
-        &catalog_dlls,
+        &catalog_dlls.dlls,
         cached,
         &backup_index.records,
         profile,
@@ -740,7 +742,7 @@ fn apply_profile(
 fn prepare_release(
     asset: &OfficialAsset,
     mut progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
-) -> WorkerResult<(PathBuf, Vec<dlss_core::CatalogDll>)> {
+) -> WorkerResult<(PathBuf, dlss_catalog::ValidatedRelease)> {
     let component = safe_component(&asset.release.id.0)?;
     let directories = dlss_platform::windows::WindowsKnownDirectories;
     let base = directories.local_app_data()?.join("DLSS Updater");
@@ -1142,6 +1144,7 @@ mod tests {
             metadata: old.release.clone(),
             state: dlss_core::ReleaseState::Ready,
             dlls: Vec::new(),
+            validation: dlss_core::ReleaseValidation::Full,
         };
         let catalog = CatalogCacheIndex {
             releases: vec![ready],

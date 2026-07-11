@@ -727,7 +727,7 @@ impl DlssApp {
         ui.horizontal(|ui| {
             ui.heading("Imported DLLs");
             if ui
-                .button(format!("{} Import DLL…", icons::FOLDER_PLUS))
+                .button(widgets::icon_text(icons::FOLDER_PLUS, "Import DLL…"))
                 .clicked()
                 && let Some(path) = rfd::FileDialog::new()
                     .add_filter("Windows DLL", &["dll"])
@@ -759,7 +759,10 @@ impl DlssApp {
             if ui
                 .add_enabled(
                     !self.runtime.catalog_loading,
-                    egui::Button::new(format!("{} Refresh catalog", icons::ARROW_CLOCKWISE)),
+                    egui::Button::new(widgets::icon_text(
+                        icons::ARROW_CLOCKWISE,
+                        "Refresh catalog",
+                    )),
                 )
                 .clicked()
             {
@@ -823,7 +826,7 @@ impl DlssApp {
                 }
                 ui.add_space(8.0);
                 if ui
-                    .button(format!("{} Add game folder…", icons::FOLDER_PLUS))
+                    .button(widgets::icon_text(icons::FOLDER_PLUS, "Add game folder…"))
                     .clicked()
                     && let Some(root) = rfd::FileDialog::new().pick_folder()
                 {
@@ -1106,7 +1109,7 @@ impl DlssApp {
             if ui
                 .add_enabled(
                     available,
-                    egui::Button::new(format!("{} Update DLSS", icons::SPARKLE)),
+                    egui::Button::new(widgets::icon_text(icons::SPARKLE, "Update DLSS")),
                 )
                 .clicked()
             {
@@ -1115,7 +1118,7 @@ impl DlssApp {
             if ui
                 .add_enabled(
                     available,
-                    egui::Button::new(format!("{} All DLLs", icons::STACK)),
+                    egui::Button::new(widgets::icon_text(icons::STACK, "All DLLs")),
                 )
                 .clicked()
             {
@@ -1204,9 +1207,9 @@ fn release_group(
                 && ui
                     .add_enabled(
                         !busy,
-                        egui::Button::new(format!(
-                            "{} Download and inspect",
-                            icons::DOWNLOAD_SIMPLE
+                        egui::Button::new(widgets::icon_text(
+                            icons::DOWNLOAD_SIMPLE,
+                            "Download and inspect",
                         )),
                     )
                     .clicked()
@@ -1215,13 +1218,13 @@ fn release_group(
             }
             if release.state == dlss_core::ReleaseState::Ready
                 && ui
-                    .button(format!("{} Remove download", icons::TRASH_SIMPLE))
+                    .button(widgets::icon_text(icons::TRASH_SIMPLE, "Remove download"))
                     .clicked()
             {
                 action = Some(ReleaseAction::Remove(release.metadata.id.clone()));
             }
             ui.hyperlink_to(
-                format!("{} View on GitHub", icons::ARROW_SQUARE_OUT),
+                widgets::icon_text(icons::ARROW_SQUARE_OUT, "View on GitHub"),
                 format!(
                     "https://github.com/NVIDIA-RTX/Streamline/releases/tag/{}",
                     release.metadata.tag
@@ -1233,11 +1236,22 @@ fn release_group(
                 egui::Label::new(egui::RichText::new(error).color(theme::DANGER)).selectable(true),
             );
             if ui
-                .small_button(format!("{} Retry", icons::ARROW_CLOCKWISE))
+                .button(widgets::icon_text(icons::ARROW_CLOCKWISE, "Retry"))
                 .clicked()
             {
                 action = Some(ReleaseAction::Inspect(release.metadata.id.clone()));
             }
+        }
+        if release.state == dlss_core::ReleaseState::Ready
+            && release.validation == dlss_core::ReleaseValidation::RevocationUnavailableFallback
+        {
+            widgets::banner(
+                ui,
+                theme::WARNING,
+                icons::WARNING,
+                "Windows could not reach revocation services. Signatures and the NVIDIA publisher were verified without the online revocation result.",
+                false,
+            );
         }
         ui.collapsing(format!("{} DLLs", release.dlls.len()), |ui| {
             for dll in &release.dlls {
@@ -1345,20 +1359,17 @@ impl eframe::App for DlssApp {
                         .show(ui, |ui| {
                             ui.set_max_width(420.0);
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new(icons::INFO).color(theme::ACCENT));
+                                ui.label(widgets::icon(icons::INFO, 15.0, theme::ACCENT));
                                 if let Some(message) = &self.toast {
                                     ui.add(egui::Label::new(message).wrap());
                                 } else {
                                     ui.label("The last DLL change can still be undone.");
                                 }
                                 if let Some(game_id) = &self.undo_game {
-                                    let undo = egui::Button::new(
-                                        egui::RichText::new(format!(
-                                            "{} Undo",
-                                            icons::ARROW_U_UP_LEFT
-                                        ))
-                                        .color(egui::Color32::BLACK),
-                                    )
+                                    let undo = egui::Button::new(widgets::icon_text(
+                                        icons::ARROW_U_UP_LEFT,
+                                        "Undo",
+                                    ))
                                     .fill(theme::ACCENT);
                                     if ui.add(undo).clicked() {
                                         undo_requested = Some(game_id.clone());

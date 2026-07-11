@@ -4,11 +4,12 @@
 use dlss_core::{
     AtomicFileReplacer, BackupStore, BatchResult, CoreError, DLSS_INDICATOR_TOOL_ID,
     DiscoveryOutcome, DiscoveryStatus, DllInspector, DllMetadata, DllVersion, ElevatedFilePlan,
-    ElevatedHelperPlan, GameId, GameInstall, GameLocator, KnownDirectories, PlatformCapabilities,
-    PrivilegeBroker, RegistryValueSnapshot, RegistryView, SignatureStatus, StoreDiscoveryReport,
-    StoreKind, SystemToolDefinition, SystemToolId, SystemToolProvider, SystemToolScope,
-    SystemToolState, ToolChangePlan, ToolChangeResult, ToolRestorePoint, TrustVerifier,
-    execute_plan, hash_file, indicator_state, now_unix, read_versioned_json, write_versioned_json,
+    ElevatedHelperPlan, GameId, GameInstall, GameLocator, KnownDirectories, NativeTrustFailure,
+    PlatformCapabilities, PrivilegeBroker, RegistryValueSnapshot, RegistryView, RevocationStatus,
+    SignatureStatus, StoreDiscoveryReport, StoreKind, SystemToolDefinition, SystemToolId,
+    SystemToolProvider, SystemToolScope, SystemToolState, ToolChangePlan, ToolChangeResult,
+    ToolRestorePoint, TrustPolicy, TrustReport, TrustVerifier, execute_plan, hash_file,
+    indicator_state, now_unix, read_versioned_json, write_versioned_json,
 };
 use object::Object;
 use sha2::{Digest, Sha256};
@@ -21,12 +22,17 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE, HWND, TRUST_E_NOSIGNATURE, WAIT_FAILED},
+        Foundation::{
+            CERT_E_REVOCATION_FAILURE, CRYPT_E_REVOCATION_OFFLINE, CloseHandle, HANDLE, HWND,
+            TRUST_E_NOSIGNATURE, WAIT_FAILED,
+        },
         Security::Cryptography::{CERT_NAME_SIMPLE_DISPLAY_TYPE, CertGetNameStringW},
         Security::WinTrust::{
-            WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
-            WTD_CHOICE_FILE, WTD_REVOKE_NONE, WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY,
-            WTD_UI_NONE, WTHelperGetProvCertFromChain, WTHelperGetProvSignerFromChain,
+            WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0,
+            WINTRUST_DATA_PROVIDER_FLAGS, WINTRUST_FILE_INFO, WTD_CHOICE_FILE,
+            WTD_REVOCATION_CHECK_CHAIN, WTD_REVOKE_NONE, WTD_REVOKE_WHOLECHAIN,
+            WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE,
+            WTHelperGetProvCertFromChain, WTHelperGetProvSignerFromChain,
             WTHelperProvDataFromStateData, WinVerifyTrust,
         },
         Storage::FileSystem::{
@@ -43,7 +49,7 @@ use windows::{
         },
         UI::WindowsAndMessaging::SW_SHOWNORMAL,
     },
-    core::PCWSTR,
+    core::{HRESULT, PCWSTR},
 };
 use windows_registry::{CURRENT_USER, LOCAL_MACHINE, Type};
 
@@ -108,7 +114,9 @@ impl DllInspector for WindowsDllInspector {
         Ok(DllMetadata {
             version: file_version(path)?,
             sha256: Sha256::digest(&bytes).into(),
-            signature: WindowsTrustVerifier.verify(path)?,
+            signature: WindowsTrustVerifier
+                .verify(path, TrustPolicy::Strict)?
+                .signature,
             x86_64,
         })
     }
@@ -421,17 +429,41 @@ fn file_version(path: &Path) -> Result<Option<DllVersion>, CoreError> {
 pub struct WindowsTrustVerifier;
 
 impl TrustVerifier for WindowsTrustVerifier {
-    fn verify(&self, path: &Path) -> Result<SignatureStatus, CoreError> {
-        Self::verify_with_signer(path).map(|result| result.0)
+    fn verify(&self, path: &Path, policy: TrustPolicy) -> Result<TrustReport, CoreError> {
+        let strict = Self::verify_once(path, true)?;
+        let fallback = if policy == TrustPolicy::OfficialNvidiaCatalog
+            && revocation_unavailable(strict.status)
+        {
+            Some(Self::verify_once(path, false)?)
+        } else {
+            None
+        };
+        Ok(resolve_trust(policy, strict, fallback))
     }
+}
 
-    fn signer_subject(&self, path: &Path) -> Result<Option<String>, CoreError> {
-        Self::verify_with_signer(path).map(|result| result.1)
+struct NativeTrustResult {
+    status: i32,
+    signer: Option<String>,
+}
+
+impl NativeTrustResult {
+    fn into_report(
+        self,
+        revocation: RevocationStatus,
+        native_failure: Option<NativeTrustFailure>,
+    ) -> TrustReport {
+        TrustReport {
+            signature: signature_status(self.status),
+            signer: self.signer,
+            revocation,
+            native_failure,
+        }
     }
 }
 
 impl WindowsTrustVerifier {
-    fn verify_with_signer(path: &Path) -> Result<(SignatureStatus, Option<String>), CoreError> {
+    fn verify_once(path: &Path, check_revocation: bool) -> Result<NativeTrustResult, CoreError> {
         let path = wide(path);
         let file_size = u32::try_from(size_of::<WINTRUST_FILE_INFO>())
             .map_err(|_| CoreError::Validation("trust file structure is too large".into()))?;
@@ -446,12 +478,21 @@ impl WindowsTrustVerifier {
         let mut data = WINTRUST_DATA {
             cbStruct: data_size,
             dwUIChoice: WTD_UI_NONE,
-            fdwRevocationChecks: WTD_REVOKE_NONE,
+            fdwRevocationChecks: if check_revocation {
+                WTD_REVOKE_WHOLECHAIN
+            } else {
+                WTD_REVOKE_NONE
+            },
             dwUnionChoice: WTD_CHOICE_FILE,
             Anonymous: WINTRUST_DATA_0 {
                 pFile: &raw mut file,
             },
             dwStateAction: WTD_STATEACTION_VERIFY,
+            dwProvFlags: if check_revocation {
+                WTD_REVOCATION_CHECK_CHAIN
+            } else {
+                WINTRUST_DATA_PROVIDER_FLAGS::default()
+            },
             ..Default::default()
         };
         let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
@@ -459,24 +500,69 @@ impl WindowsTrustVerifier {
         // state is always closed after verification, including failed verification.
         let (status, signer) = unsafe {
             let status = WinVerifyTrust(HWND::default(), &raw mut action, (&raw mut data).cast());
-            let signer = if status == 0 {
-                signer_subject_from_state(data.hWVTStateData)
-            } else {
-                None
-            };
+            let signer = signer_subject_from_state(data.hWVTStateData);
             data.dwStateAction = WTD_STATEACTION_CLOSE;
             let _ = WinVerifyTrust(HWND::default(), &raw mut action, (&raw mut data).cast());
             (status, signer)
         };
-        let signature = if status == 0 {
-            SignatureStatus::Trusted
-        } else if status == TRUST_E_NOSIGNATURE.0 {
-            SignatureStatus::Unsigned
-        } else {
-            SignatureStatus::Untrusted
-        };
-        Ok((signature, signer))
+        Ok(NativeTrustResult { status, signer })
     }
+}
+
+fn signature_status(status: i32) -> SignatureStatus {
+    if status == 0 {
+        SignatureStatus::Trusted
+    } else if status == TRUST_E_NOSIGNATURE.0 {
+        SignatureStatus::Unsigned
+    } else {
+        SignatureStatus::Untrusted
+    }
+}
+
+fn revocation_unavailable(status: i32) -> bool {
+    status == CRYPT_E_REVOCATION_OFFLINE.0 || status == CERT_E_REVOCATION_FAILURE.0
+}
+
+fn native_failure(status: i32) -> NativeTrustFailure {
+    NativeTrustFailure {
+        status,
+        reason: windows::core::Error::from_hresult(HRESULT(status)).to_string(),
+    }
+}
+
+fn resolve_trust(
+    policy: TrustPolicy,
+    strict: NativeTrustResult,
+    fallback: Option<NativeTrustResult>,
+) -> TrustReport {
+    if strict.status == 0 {
+        return strict.into_report(RevocationStatus::Verified, None);
+    }
+    let strict_status = strict.status;
+    if policy == TrustPolicy::OfficialNvidiaCatalog
+        && revocation_unavailable(strict_status)
+        && let Some(fallback) = fallback
+    {
+        if fallback.status == 0
+            && fallback
+                .signer
+                .as_deref()
+                .is_some_and(dlss_core::is_nvidia_signer)
+        {
+            return fallback.into_report(
+                RevocationStatus::UnavailableFallback,
+                Some(native_failure(strict_status)),
+            );
+        }
+        return fallback.into_report(
+            RevocationStatus::NotVerified,
+            Some(native_failure(strict_status)),
+        );
+    }
+    strict.into_report(
+        RevocationStatus::NotVerified,
+        Some(native_failure(strict_status)),
+    )
 }
 
 unsafe fn signer_subject_from_state(state: HANDLE) -> Option<String> {
@@ -969,11 +1055,14 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<(), CoreEr
             }
             let metadata = WindowsDllInspector.inspect(&source)?;
             let verifier = WindowsTrustVerifier;
-            let signer = verifier.signer_subject(&source)?;
+            let trust = verifier.verify(&source, TrustPolicy::Strict)?;
             if !metadata.x86_64
                 || metadata.version.is_none()
-                || verifier.verify(&source)? != SignatureStatus::Trusted
-                || !signer.as_deref().is_some_and(dlss_core::is_nvidia_signer)
+                || trust.signature != SignatureStatus::Trusted
+                || !trust
+                    .signer
+                    .as_deref()
+                    .is_some_and(dlss_core::is_nvidia_signer)
             {
                 return Err(CoreError::Validation(
                     "imported source failed elevated trust validation".into(),
@@ -987,6 +1076,73 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<(), CoreEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn native(status: i32, signer: Option<&str>) -> NativeTrustResult {
+        NativeTrustResult {
+            status,
+            signer: signer.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn strict_trust_requires_revocation_success() {
+        let report = resolve_trust(
+            TrustPolicy::Strict,
+            native(0, Some("NVIDIA Corporation")),
+            None,
+        );
+        assert_eq!(report.signature, SignatureStatus::Trusted);
+        assert_eq!(report.revocation, RevocationStatus::Verified);
+    }
+
+    #[test]
+    fn only_offline_revocation_for_official_nvidia_can_fallback() {
+        let offline = CRYPT_E_REVOCATION_OFFLINE.0;
+        let accepted = resolve_trust(
+            TrustPolicy::OfficialNvidiaCatalog,
+            native(offline, None),
+            Some(native(0, Some("NVIDIA Corporation"))),
+        );
+        assert_eq!(accepted.signature, SignatureStatus::Trusted);
+        assert_eq!(accepted.revocation, RevocationStatus::UnavailableFallback);
+        assert_eq!(accepted.native_failure.unwrap().status, offline);
+
+        let wrong_signer = resolve_trust(
+            TrustPolicy::OfficialNvidiaCatalog,
+            native(offline, None),
+            Some(native(0, Some("Example Publisher"))),
+        );
+        assert_ne!(
+            wrong_signer.revocation,
+            RevocationStatus::UnavailableFallback
+        );
+
+        let strict = resolve_trust(
+            TrustPolicy::Strict,
+            native(offline, None),
+            Some(native(0, Some("NVIDIA Corporation"))),
+        );
+        assert_eq!(strict.signature, SignatureStatus::Untrusted);
+    }
+
+    #[test]
+    fn non_revocation_trust_failures_never_fallback() {
+        for status in [
+            0x8009_6010_u32.cast_signed(), // TRUST_E_BAD_DIGEST
+            0x800B_0101_u32.cast_signed(), // CERT_E_EXPIRED
+            0x800B_0109_u32.cast_signed(), // CERT_E_UNTRUSTEDROOT
+            0x800B_0111_u32.cast_signed(), // TRUST_E_EXPLICIT_DISTRUST
+        ] {
+            let report = resolve_trust(
+                TrustPolicy::OfficialNvidiaCatalog,
+                native(status, Some("NVIDIA Corporation")),
+                Some(native(0, Some("NVIDIA Corporation"))),
+            );
+            assert_eq!(report.signature, SignatureStatus::Untrusted);
+            assert_eq!(report.revocation, RevocationStatus::NotVerified);
+            assert_eq!(report.native_failure.unwrap().status, status);
+        }
+    }
 
     #[test]
     fn elevated_helper_rejects_bad_nonces_and_result_paths() {

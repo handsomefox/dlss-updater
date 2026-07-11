@@ -1,6 +1,7 @@
 use crate::{
     CatalogDll, CoreError, DllInspector, DllKind, DllVersion, ReleaseId, SignatureStatus,
-    TrustVerifier, copy_flush_hash, hash_file, read_versioned_json, write_versioned_json,
+    TrustPolicy, TrustVerifier, copy_flush_hash, hash_file, read_versioned_json,
+    write_versioned_json,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -71,13 +72,14 @@ impl ImportStore {
         let version = metadata
             .version
             .ok_or_else(|| CoreError::Validation("import has no version resource".into()))?;
-        if verifier.verify(source)? != SignatureStatus::Trusted {
+        let trust = verifier.verify(source, TrustPolicy::Strict)?;
+        if trust.signature != SignatureStatus::Trusted {
             return Err(CoreError::Validation(
                 "import signature is not trusted".into(),
             ));
         }
-        let signer = verifier
-            .signer_subject(source)?
+        let signer = trust
+            .signer
             .filter(|subject| is_nvidia_signer(subject))
             .ok_or_else(|| {
                 CoreError::Validation("import is not signed by NVIDIA Corporation".into())
@@ -182,7 +184,7 @@ fn hex_hash(hash: [u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DllMetadata, SignatureStatus};
+    use crate::{DllMetadata, RevocationStatus, SignatureStatus, TrustReport};
     use sha2::{Digest, Sha256};
 
     struct Inspector {
@@ -206,11 +208,17 @@ mod tests {
         subject: Option<String>,
     }
     impl TrustVerifier for Trust {
-        fn verify(&self, _path: &Path) -> Result<SignatureStatus, CoreError> {
-            Ok(self.status)
-        }
-        fn signer_subject(&self, _path: &Path) -> Result<Option<String>, CoreError> {
-            Ok(self.subject.clone())
+        fn verify(&self, _path: &Path, _policy: TrustPolicy) -> Result<TrustReport, CoreError> {
+            Ok(TrustReport {
+                signature: self.status,
+                signer: self.subject.clone(),
+                revocation: if self.status == SignatureStatus::Trusted {
+                    RevocationStatus::Verified
+                } else {
+                    RevocationStatus::NotVerified
+                },
+                native_failure: None,
+            })
         }
     }
 

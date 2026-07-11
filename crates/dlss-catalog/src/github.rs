@@ -15,6 +15,8 @@ use std::{
 
 const RELEASES_URL: &str =
     "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases?per_page=100";
+const OFFICIAL_DOWNLOAD_PREFIX: &str =
+    "https://github.com/NVIDIA-RTX/Streamline/releases/download/";
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct OfficialAsset {
@@ -51,11 +53,14 @@ pub enum GithubError {
     InvalidDigest,
     #[error("too many GitHub release pages")]
     TooManyPages,
+    #[error("release asset URL is outside the official NVIDIA-RTX/Streamline download path")]
+    UnexpectedDownloadUrl,
 }
 
 pub struct GithubCatalogClient {
     client: Client,
     releases_url: String,
+    enforce_official_downloads: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,6 +89,7 @@ impl GithubCatalogClient {
                 .connect_timeout(Duration::from_secs(30))
                 .build()?,
             releases_url: RELEASES_URL.into(),
+            enforce_official_downloads: true,
         })
     }
 
@@ -91,6 +97,7 @@ impl GithubCatalogClient {
     fn with_releases_url(releases_url: String) -> Result<Self, GithubError> {
         let mut client = Self::new()?;
         client.releases_url = releases_url;
+        client.enforce_official_downloads = false;
         Ok(client)
     }
 
@@ -157,6 +164,11 @@ impl GithubCatalogClient {
         destination: &Path,
         mut progress: impl FnMut(DownloadProgress),
     ) -> Result<PathBuf, GithubError> {
+        if self.enforce_official_downloads
+            && !asset.download_url.starts_with(OFFICIAL_DOWNLOAD_PREFIX)
+        {
+            return Err(GithubError::UnexpectedDownloadUrl);
+        }
         if asset.size > MAX_ARCHIVE_BYTES {
             return Err(GithubError::TooLarge);
         }
@@ -505,7 +517,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let destination = directory.path().join("archive.zip");
         let mut updates = Vec::new();
-        GithubCatalogClient::new()
+        GithubCatalogClient::with_releases_url("test".into())
             .unwrap()
             .download_with_progress(&asset, &destination, |progress| updates.push(progress))
             .unwrap();
@@ -518,11 +530,13 @@ mod tests {
             ..asset.clone()
         };
         assert!(matches!(
-            GithubCatalogClient::new().unwrap().download_with_progress(
-                &too_large,
-                &directory.path().join("too-large.zip"),
-                |_| {}
-            ),
+            GithubCatalogClient::with_releases_url("test".into())
+                .unwrap()
+                .download_with_progress(
+                    &too_large,
+                    &directory.path().join("too-large.zip"),
+                    |_| {}
+                ),
             Err(GithubError::TooLarge)
         ));
 
@@ -533,11 +547,9 @@ mod tests {
             ..asset
         };
         assert!(matches!(
-            GithubCatalogClient::new().unwrap().download_with_progress(
-                &wrong_digest,
-                &directory.path().join("wrong.zip"),
-                |_| {}
-            ),
+            GithubCatalogClient::with_releases_url("test".into())
+                .unwrap()
+                .download_with_progress(&wrong_digest, &directory.path().join("wrong.zip"), |_| {}),
             Err(GithubError::DigestMismatch)
         ));
         server.join().unwrap();
@@ -559,7 +571,7 @@ mod tests {
             digest: None,
         };
         let directory = tempdir().unwrap();
-        let error = GithubCatalogClient::new()
+        let error = GithubCatalogClient::with_releases_url("test".into())
             .unwrap()
             .download_with_progress(&asset, &directory.path().join("archive.zip"), |_| {})
             .unwrap_err();
@@ -593,6 +605,30 @@ mod tests {
         assert!(matches!(
             validate_cached_archive(&asset, &path),
             Err(GithubError::SizeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn production_client_rejects_non_official_download_urls() {
+        let asset = OfficialAsset {
+            release: ReleaseMetadata {
+                id: ReleaseId("v1".into()),
+                tag: "v1".into(),
+                asset_name: "streamline-sdk-v1.zip".into(),
+                published_unix: 1,
+            },
+            download_url: "https://example.invalid/streamline.zip".into(),
+            size: 1,
+            digest: None,
+        };
+        let directory = tempdir().unwrap();
+        assert!(matches!(
+            GithubCatalogClient::new().unwrap().download_with_progress(
+                &asset,
+                &directory.path().join("archive.zip"),
+                |_| {}
+            ),
+            Err(GithubError::UnexpectedDownloadUrl)
         ));
     }
 }

@@ -161,6 +161,36 @@ pub enum SignatureStatus {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum TrustPolicy {
+    /// Require normal platform trust, including an online revocation result.
+    Strict,
+    /// Official NVIDIA-RTX/Streamline catalog content may use the narrowly
+    /// constrained revocation-service-unavailable fallback.
+    OfficialNvidiaCatalog,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum RevocationStatus {
+    Verified,
+    UnavailableFallback,
+    NotVerified,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NativeTrustFailure {
+    pub status: i32,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TrustReport {
+    pub signature: SignatureStatus,
+    pub signer: Option<String>,
+    pub revocation: RevocationStatus,
+    pub native_failure: Option<NativeTrustFailure>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DllMetadata {
     pub version: Option<DllVersion>,
@@ -210,6 +240,13 @@ pub struct CachedRelease {
     pub metadata: ReleaseMetadata,
     pub state: ReleaseState,
     pub dlls: Vec<CatalogDll>,
+    pub validation: ReleaseValidation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum ReleaseValidation {
+    Full,
+    RevocationUnavailableFallback,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 use crate::{
-    DiscoveryOutcome, DllMetadata, SignatureStatus, SystemToolDefinition, SystemToolId,
-    SystemToolState, ToolChangePlan, ToolChangeResult, ToolRestorePoint,
+    DiscoveryOutcome, DllMetadata, SystemToolDefinition, SystemToolId, SystemToolState,
+    ToolChangePlan, ToolChangeResult, ToolRestorePoint, TrustPolicy, TrustReport,
 };
 use std::path::{Path, PathBuf};
 
@@ -65,15 +65,7 @@ pub trait TrustVerifier: Send + Sync {
     ///
     /// # Errors
     /// Returns an error when trust evaluation cannot be completed.
-    fn verify(&self, path: &Path) -> Result<SignatureStatus, CoreError>;
-
-    /// Returns the verified leaf signer's simple display name when available.
-    ///
-    /// # Errors
-    /// Returns an error when signer extraction cannot be completed.
-    fn signer_subject(&self, _path: &Path) -> Result<Option<String>, CoreError> {
-        Ok(None)
-    }
+    fn verify(&self, path: &Path, policy: TrustPolicy) -> Result<TrustReport, CoreError>;
 }
 pub trait KnownDirectories: Send + Sync {
     /// Returns the per-user application-data directory.
