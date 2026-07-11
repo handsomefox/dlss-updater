@@ -192,7 +192,6 @@ pub(crate) mod icons {
     pub(crate) const SHIELD_CHECK: &str = "\u{E40C}";
     pub(crate) const SHIELD_SLASH: &str = "\u{E410}";
     pub(crate) const SHIELD_WARNING: &str = "\u{E412}";
-    pub(crate) const SLIDERS_HORIZONTAL: &str = "\u{E434}";
     pub(crate) const SPARKLE: &str = "\u{E6A2}";
     pub(crate) const STACK: &str = "\u{E466}";
     pub(crate) const TRASH_SIMPLE: &str = "\u{E4A8}";

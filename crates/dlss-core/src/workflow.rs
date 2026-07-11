@@ -321,9 +321,15 @@ fn execute_swap(
     replacer.replace(&swap.target_path, &swap.source_path, swap.source_sha256)?;
     let installed = inspector.inspect(&swap.target_path)?;
     if installed.sha256 != swap.source_sha256 {
-        return Err(CoreError::Validation(
-            "replacement verification hash mismatch".into(),
-        ));
+        let verification = CoreError::Validation("replacement verification hash mismatch".into());
+        if let Err(rollback) =
+            replacer.replace(&swap.target_path, &backup.content_path, backup.sha256)
+        {
+            return Err(CoreError::Validation(format!(
+                "{verification}; backup rollback failed: {rollback}"
+            )));
+        }
+        return Err(verification);
     }
     Ok((installed, backup))
 }

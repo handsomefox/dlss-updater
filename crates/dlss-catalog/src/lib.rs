@@ -12,7 +12,7 @@ use std::{
     collections::HashSet,
     fs::{self, File},
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -24,6 +24,66 @@ enum CandidateTrust {
 }
 
 pub const CATALOG_SCHEMA_VERSION: u32 = 1;
+pub const PREPARED_RELEASE_SCHEMA_VERSION: u32 = 1;
+const PREPARED_MANIFEST: &str = "manifest.json";
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct PreparedReleaseEntry {
+    pub file_name: String,
+    pub version: dlss_core::DllVersion,
+    pub sha256: [u8; 32],
+    pub source: PathBuf,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct PreparedReleaseManifest {
+    pub release: ReleaseId,
+    pub validation: ReleaseValidation,
+    pub dlls: Vec<PreparedReleaseEntry>,
+}
+
+/// Loads a prepared release only when its versioned manifest and every DLL hash agree.
+///
+/// # Errors
+/// Returns an error when manifest files or prepared DLLs cannot be read.
+pub fn load_prepared_release(
+    destination: &Path,
+    release: &ReleaseId,
+) -> Result<Option<ValidatedRelease>, CatalogError> {
+    let manifest_path = destination.join(PREPARED_MANIFEST);
+    if !manifest_path.exists() {
+        return Ok(None);
+    }
+    let manifest: PreparedReleaseManifest =
+        match dlss_core::read_versioned_json(&manifest_path, PREPARED_RELEASE_SCHEMA_VERSION) {
+            Ok(manifest) => manifest,
+            Err(_) => return Ok(None),
+        };
+    if manifest.release != *release || manifest.dlls.is_empty() {
+        return Ok(None);
+    }
+    let mut dlls = Vec::with_capacity(manifest.dlls.len());
+    for entry in manifest.dlls {
+        if entry.source.is_absolute() || entry.source.components().count() != 1 {
+            return Ok(None);
+        }
+        let source = destination.join(&entry.source);
+        if !source.is_file() || sha256_file(&source)? != entry.sha256 {
+            return Ok(None);
+        }
+        dlls.push(CatalogDll {
+            file_name: entry.file_name.into(),
+            version: entry.version,
+            sha256: entry.sha256,
+            source,
+            release: release.clone(),
+        });
+    }
+    Ok(Some(ValidatedRelease {
+        dlls,
+        validation: manifest.validation,
+    }))
+}
 
 #[derive(Clone, Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct CatalogCacheIndex {
@@ -143,6 +203,31 @@ pub fn validate_and_extract(
             return Err(error);
         }
     };
+    let manifest = PreparedReleaseManifest {
+        release: release.clone(),
+        validation: extracted.validation,
+        dlls: extracted
+            .dlls
+            .iter()
+            .map(|dll| PreparedReleaseEntry {
+                file_name: dll.file_name.to_string_lossy().into_owned(),
+                version: dll.version,
+                sha256: dll.sha256,
+                source: PathBuf::from(&dll.file_name),
+            })
+            .collect(),
+    };
+    if let Err(error) = dlss_core::write_versioned_json(
+        &staging.join(PREPARED_MANIFEST),
+        PREPARED_RELEASE_SCHEMA_VERSION,
+        &manifest,
+    ) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(CatalogError::Inspection(
+            PREPARED_MANIFEST.into(),
+            error.to_string(),
+        ));
+    }
     let had_previous = destination.exists();
     if had_previous && let Err(error) = fs::rename(destination, &previous) {
         let _ = fs::remove_dir_all(&staging);

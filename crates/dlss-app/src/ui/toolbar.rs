@@ -133,23 +133,18 @@ impl DlssApp {
                     .collect();
                 self.open_review(ReviewIntent::QuickDlss(ids));
             }
-            if let Some(report) = self.discovery_reports.iter().find(|report| {
+            if self.discovery_reports.iter().any(|report| {
                 report.games_found == 0
                     && matches!(
                         report.status,
                         dlss_core::DiscoveryStatus::NotDetected | dlss_core::DiscoveryStatus::Error
                     )
-            }) {
-                ui.scope(|ui| {
-                    widgets::chip(ui, icons::WARNING, "Store warning", theme::WARNING);
-                })
-                .response
-                .on_hover_text(
-                    report
-                        .detail
-                        .as_deref()
-                        .unwrap_or("A store was not detected"),
-                );
+            }) && ui
+                .button(widgets::icon_text(icons::WARNING, "Store warnings"))
+                .clicked()
+            {
+                self.open_windows
+                    .insert(super::super::AppWindow::StoreWarnings);
             }
         });
     }

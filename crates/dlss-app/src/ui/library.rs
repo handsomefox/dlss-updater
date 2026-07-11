@@ -3,11 +3,12 @@
 use super::theme::{self, icons};
 use super::{table, widgets};
 use crate::ui::review::ReviewIntent;
-use crate::{DlssApp, GameFilter, GameRow, GameSort, SortKey, StoreFilter, View};
+use crate::{Command, DlssApp, GameFilter, GameRow, GameSort, SortKey, StoreFilter, View};
 use eframe::egui;
 
 impl DlssApp {
     pub(crate) fn library_view(&mut self, ui: &mut egui::Ui) {
+        self.render_release_setup(ui);
         let rows = self.filtered_game_rows();
         let (requested_sort, requested_review) = self.render_game_rows(ui, &rows);
         if let Some(sort) = requested_sort {
@@ -17,6 +18,45 @@ impl DlssApp {
             self.open_review(intent);
         }
         self.render_game_empty_state(ui, rows.is_empty());
+    }
+
+    fn render_release_setup(&mut self, ui: &mut egui::Ui) {
+        let has_ready_release = self
+            .releases
+            .iter()
+            .any(|release| release.state == dlss_core::ReleaseState::Ready);
+        if self.runtime.catalog_loading || has_ready_release {
+            return;
+        }
+        let latest = self.latest_release_meta().cloned();
+        widgets::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(widgets::icon(icons::DOWNLOAD_SIMPLE, 20.0, theme::ACCENT));
+                ui.vertical(|ui| {
+                    ui.strong("Download an official DLL source to get started");
+                    ui.weak(
+                        "A validated release is required before DLSS Updater can change game DLLs.",
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(release) = &latest
+                        && ui
+                            .button(format!("Download latest · {}", release.metadata.tag))
+                            .clicked()
+                    {
+                        self.inspecting_release = Some(release.metadata.id.clone());
+                        let _ = self
+                            .worker
+                            .commands
+                            .send(Command::InspectRelease(release.metadata.id.clone()));
+                    }
+                    if ui.button("Choose release…").clicked() {
+                        self.open_windows.insert(crate::AppWindow::Releases);
+                    }
+                });
+            });
+        });
+        ui.add_space(8.0);
     }
 
     fn filtered_game_rows(&self) -> Vec<usize> {

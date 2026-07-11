@@ -29,8 +29,8 @@ fn main() -> eframe::Result {
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1180.0, 720.0])
-            .with_min_inner_size([850.0, 520.0]),
+            .with_inner_size([1400.0, 860.0])
+            .with_min_inner_size([1000.0, 640.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -104,6 +104,8 @@ struct DlssApp {
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 enum AppWindow {
     Tools,
+    ToolInfo,
+    StoreWarnings,
     Releases,
     Activity,
     Roots,
@@ -660,9 +662,9 @@ impl DlssApp {
                     if ui.add_enabled(can_restore, egui::Button::new("Restore Previous")).clicked() {
                         self.change_indicator(true);
                     }
-                    ui.label("Info").on_hover_text(
-                        "If another program changes this value, confirmation is required before apply or restore.",
-                    );
+                    if ui.button(widgets::icon_text(icons::INFO, "About this setting")).clicked() {
+                        self.open_windows.insert(AppWindow::ToolInfo);
+                    }
                 });
                 if let Some(error) = &self.last_error {
                     selectable_error(ui, error);
@@ -670,6 +672,48 @@ impl DlssApp {
             });
         });
         self.set_window_open(AppWindow::Tools, open);
+    }
+
+    fn tool_info_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.open_windows.contains(&AppWindow::ToolInfo);
+        egui::Window::new("About the DLSS indicator")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                ui.label("This changes NVIDIA's machine-wide DLSS indicator registry setting and affects every compatible game on this PC.");
+                ui.add_space(6.0);
+                ui.label("If another program changes the setting, DLSS Updater requires confirmation before applying or restoring it.");
+            });
+        self.set_window_open(AppWindow::ToolInfo, open);
+    }
+
+    fn store_warnings_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.open_windows.contains(&AppWindow::StoreWarnings);
+        egui::Window::new("Store discovery warnings")
+            .open(&mut open)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                for report in self.discovery_reports.iter().filter(|report| {
+                    report.games_found == 0
+                        && matches!(
+                            report.status,
+                            dlss_core::DiscoveryStatus::NotDetected
+                                | dlss_core::DiscoveryStatus::Error
+                        )
+                }) {
+                    ui.strong(discovery_report_label(report));
+                    ui.label(
+                        report
+                            .detail
+                            .as_deref()
+                            .unwrap_or("The store was not detected."),
+                    );
+                    ui.separator();
+                }
+            });
+        self.set_window_open(AppWindow::StoreWarnings, open);
     }
 
     fn releases_window(&mut self, ctx: &egui::Context) {
@@ -680,7 +724,7 @@ impl DlssApp {
             .open(&mut open)
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
-            .default_width(620.0)
+            .fixed_size([700.0, 650.0])
             .show(ctx, |ui| {
                 remove_import = self.render_imports(ui);
                 ui.separator();
@@ -1320,6 +1364,12 @@ impl eframe::App for DlssApp {
         });
         if self.open_windows.contains(&AppWindow::Tools) {
             self.tools_window(root.ctx());
+        }
+        if self.open_windows.contains(&AppWindow::ToolInfo) {
+            self.tool_info_window(root.ctx());
+        }
+        if self.open_windows.contains(&AppWindow::StoreWarnings) {
+            self.store_warnings_window(root.ctx());
         }
         if self.open_windows.contains(&AppWindow::Releases) {
             self.releases_window(root.ctx());

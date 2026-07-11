@@ -36,8 +36,9 @@ use windows::{
             WTHelperProvDataFromStateData, WinVerifyTrust,
         },
         Storage::FileSystem::{
-            GetFileVersionInfoSizeW, GetFileVersionInfoW, REPLACE_FILE_FLAGS, ReplaceFileW,
-            VS_FIXEDFILEINFO, VerQueryValueW,
+            GetFileVersionInfoSizeW, GetFileVersionInfoW, MOVE_FILE_FLAGS,
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, VS_FIXEDFILEINFO,
+            VerQueryValueW,
         },
         System::{
             Com::CoTaskMemFree,
@@ -668,13 +669,10 @@ impl AtomicFileReplacer for WindowsAtomicFileReplacer {
             let stage_wide = wide(&stage);
             // SAFETY: both path buffers are NUL-terminated and remain alive for the call.
             unsafe {
-                ReplaceFileW(
-                    PCWSTR(target_wide.as_ptr()),
+                MoveFileExW(
                     PCWSTR(stage_wide.as_ptr()),
-                    PCWSTR::null(),
-                    REPLACE_FILE_FLAGS::default(),
-                    None,
-                    None,
+                    PCWSTR(target_wide.as_ptr()),
+                    MOVE_FILE_FLAGS(MOVEFILE_REPLACE_EXISTING.0 | MOVEFILE_WRITE_THROUGH.0),
                 )
                 .map_err(|error| replace_error(&error))
             }

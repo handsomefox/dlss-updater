@@ -322,6 +322,47 @@ fn profile_command(
         .flat_map(|release| release.dlls.iter().cloned())
         .collect();
     cached.extend(dlss_core::imported_catalog_dlls(&state.imports));
+    #[cfg(windows)]
+    for release_id in profile
+        .targets
+        .values()
+        .filter_map(|desired| match desired {
+            dlss_core::DesiredDll::Cached { release, .. } => Some(release),
+            _ => None,
+        })
+    {
+        if !cached.iter().any(|dll| &dll.release == release_id) {
+            let asset = state
+                .assets
+                .iter()
+                .find(|asset| &asset.release.id == release_id)
+                .ok_or_else(|| {
+                    WorkerError::State(format!(
+                        "selected official release {} is unavailable",
+                        release_id.0
+                    ))
+                });
+            match asset.and_then(|asset| {
+                inspect_release(asset, |release_state, received, total| {
+                    progress_events.send(Event::ReleaseProgress {
+                        id: release_id.clone(),
+                        state: release_state,
+                        received,
+                        total,
+                    });
+                })
+            }) {
+                Ok(release) => {
+                    cached.extend(release.dlls.iter().cloned());
+                    state.catalog.upsert_release(release);
+                }
+                Err(error) => {
+                    finish_game_operation(id, game, Err(error), events, state);
+                    return;
+                }
+            }
+        }
+    }
     let result = latest_asset(&state.assets)
         .ok_or_else(|| WorkerError::State("official release metadata is not available".into()))
         .and_then(|asset| {
@@ -749,6 +790,11 @@ fn prepare_release(
     let archive = base.join("cache/archives").join(format!("{component}.zip"));
     let extracted = base.join("cache/releases").join(component);
     tracing::info!(release = %asset.release.tag, archive = %archive.display(), "preparing release");
+    if let Some(prepared) = dlss_catalog::load_prepared_release(&extracted, &asset.release.id)? {
+        tracing::info!(release = %asset.release.tag, prepared = %extracted.display(), dlls = prepared.dlls.len(), "prepared release cache hit");
+        return Ok((base, prepared));
+    }
+    tracing::info!(release = %asset.release.tag, prepared = %extracted.display(), "prepared release cache miss");
     let client = GithubCatalogClient::new()?;
     let mut downloaded_fresh = false;
     if archive.exists()
@@ -791,7 +837,11 @@ fn prepare_release(
     );
     tracing::info!(release = %asset.release.tag, "validating release archive");
     match extract(&archive) {
-        Ok(catalog_dlls) => Ok((base, catalog_dlls)),
+        Ok(catalog_dlls) => {
+            std::fs::remove_file(&archive)?;
+            tracing::info!(release = %asset.release.tag, dlls = catalog_dlls.dlls.len(), "prepared release committed and archive removed");
+            Ok((base, catalog_dlls))
+        }
         // A cached archive that was never digest-verified may be corrupt or
         // truncated and would fail forever. Discard it and re-download once.
         Err(error)
@@ -823,6 +873,8 @@ fn prepare_release(
                 Some(asset.size),
             );
             let catalog_dlls = extract(&archive)?;
+            std::fs::remove_file(&archive)?;
+            tracing::info!(release = %asset.release.tag, dlls = catalog_dlls.dlls.len(), "prepared release committed and archive removed");
             Ok((base, catalog_dlls))
         }
         Err(error) => Err(error.into()),
@@ -837,14 +889,27 @@ fn execute_game_plan(
     plan: &dlss_core::OperationPlan,
 ) -> UpgradeReport {
     if plan.swaps.is_empty() {
+        tracing::warn!(game = %game.name, release = %asset.release.tag, "profile resolved to an empty swap plan");
         return UpgradeReport {
             changed: 0,
             failed: 0,
             release: asset.release.tag.clone(),
             can_undo: false,
-            warning: None,
+            warning: Some("No DLL changes were planned. The selected versions already match the installed files, or no DLL target was selected.".into()),
             undo_plan: None,
         };
+    }
+    for swap in &plan.swaps {
+        tracing::info!(
+            game = %game.name,
+            installation = %swap.installation.0,
+            source = %swap.source_path.display(),
+            source_hash = ?swap.source_sha256,
+            destination = %swap.target_path.display(),
+            destination_hash = ?swap.expected_sha256,
+            comparison = ?swap.comparison,
+            "planned DLL swap"
+        );
     }
     let inspector = dlss_platform::windows::WindowsDllInspector;
     let backups = dlss_core::BackupStore::new(base.join("backups"));

@@ -114,9 +114,10 @@ impl DlssApp {
                         ui.label("Updating…");
                         return;
                     }
-                    let primary =
-                        egui::Button::new(widgets::icon_text(icons::SPARKLE, "Update DLSS"))
-                            .fill(theme::ACCENT);
+                    let primary = egui::Button::new(
+                        egui::RichText::new("Update DLSS").color(egui::Color32::BLACK),
+                    )
+                    .fill(theme::ACCENT);
                     if ui
                         .add_enabled(can_update, primary)
                         .on_hover_text("Review and update this game's DLSS DLLs")
@@ -215,15 +216,6 @@ impl DlssApp {
                         });
                     widgets::status_chip(ui, comparison);
                     widgets::signature_chip(ui, dll.metadata.signature);
-                    widgets::badge(
-                        ui,
-                        egui::RichText::new(dll.metadata.version.map_or_else(
-                            || "Version unknown".into(),
-                            |version| version.to_string(),
-                        ))
-                        .monospace(),
-                        theme::TEXT,
-                    );
                 });
             });
             ui.add(
@@ -235,20 +227,36 @@ impl DlssApp {
                 )
                 .selectable(true),
             );
-            ui.collapsing(
-                widgets::icon_text(icons::SLIDERS_HORIZONTAL, "Advanced target"),
-                |ui| {
-                    self.desired_target_combo(ui, dll);
-                    ui.weak(
-                        "Advanced targets may upgrade, downgrade, restore, or install a \
-                         different official build. Changes are staged until you review \
-                         and apply them.",
+            ui.horizontal(|ui| {
+                ui.label("Version:");
+                self.desired_target_combo(ui, dll);
+                if let Some(backup) = self
+                    .backups
+                    .iter()
+                    .filter(|backup| backup.original_path == dll.path)
+                    .max_by_key(|backup| backup.created_unix)
+                    .cloned()
+                    && ui
+                        .button(widgets::icon_text(icons::ARROW_U_UP_LEFT, "Undo this DLL"))
+                        .on_hover_text("Stage this DLL's most recent backup for restore")
+                        .clicked()
+                {
+                    self.persisted.target_profile.targets.insert(
+                        dll.id.clone(),
+                        dlss_core::DesiredDll::Restore {
+                            backup_sha256: backup.sha256,
+                        },
                     );
-                },
-            );
+                }
+            });
+            ui.weak("Choose a version for this DLL. The change is staged until Review & apply.");
         });
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the selector builds official, imported, and backup choices in one widget"
+    )]
     fn desired_target_combo(&mut self, ui: &mut egui::Ui, dll: &dlss_core::DllInstallation) {
         let mut cached_options: Vec<_> = self
             .releases
@@ -306,7 +314,6 @@ impl DlssApp {
             })
             .collect();
         ui.horizontal(|ui| {
-            ui.label("Desired:");
             // Render from a local value and only write back on an actual
             // change, so merely viewing a game never persists a profile
             // entry for every DLL (which would leak entries forever).
@@ -318,14 +325,40 @@ impl DlssApp {
                 .cloned()
                 .unwrap_or(dlss_core::DesiredDll::KeepInstalled);
             let before = desired.clone();
+            let installed_label = dll.metadata.version.map_or_else(
+                || "Installed · version unknown".into(),
+                |version| format!("{version} · Installed"),
+            );
+            let selected_label = match &desired {
+                dlss_core::DesiredDll::KeepInstalled => installed_label.clone(),
+                dlss_core::DesiredDll::Cached { .. } => cached_options
+                    .iter()
+                    .find(|(target, _)| target == &desired)
+                    .map_or_else(|| desired_label(&desired), |(_, label)| label.clone()),
+                dlss_core::DesiredDll::Restore { .. } => restore_options
+                    .iter()
+                    .find(|(target, _)| target == &desired)
+                    .map_or_else(|| desired_label(&desired), |(_, label)| label.clone()),
+                dlss_core::DesiredDll::LatestOfficial => self
+                    .latest_catalog()
+                    .iter()
+                    .filter(|candidate| {
+                        dlss_core::same_file_name(&candidate.file_name, &dll.file_name)
+                    })
+                    .max_by_key(|candidate| (candidate.version, candidate.sha256))
+                    .map_or_else(
+                        || "Latest official".into(),
+                        |candidate| format!("{} · Latest official", candidate.version),
+                    ),
+            };
             egui::ComboBox::from_id_salt(("desired", &dll.id.0))
-                .width(ui.available_width().max(140.0))
-                .selected_text(desired_label(&desired))
+                .width(260.0)
+                .selected_text(selected_label)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
                         &mut desired,
                         dlss_core::DesiredDll::KeepInstalled,
-                        "Keep installed",
+                        &installed_label,
                     );
                     ui.selectable_value(
                         &mut desired,
