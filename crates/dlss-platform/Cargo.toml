@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-dlss-core = { version = "0.1.0", path = "../dlss-core" }
+dlss-core = { version = "1.0.0", path = "../dlss-core" }
 object.workspace = true
 serde.workspace = true
 serde_json.workspace = true

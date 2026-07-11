@@ -746,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "dlss-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "crossbeam-channel",
  "dlss-catalog",
@@ -767,7 +767,7 @@ dependencies = [
 
 [[package]]
 name = "dlss-catalog"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "dlss-core",
  "jiff",
@@ -783,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "dlss-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "atomic-write-file",
  "serde",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "dlss-platform"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "dlss-core",
  "object",
