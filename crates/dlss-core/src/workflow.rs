@@ -1,7 +1,7 @@
 use crate::{
     AtomicFileReplacer, BackupIndex, BackupRecord, BatchResult, CatalogDll, Comparison, CoreError,
-    DesiredDll, DllInspector, DllInstallation, OperationPlan, PlannedSwap, SwapResult,
-    TargetProfile, compare_target,
+    DesiredDll, DllInspector, DllInstallation, OperationPlan, PlannedSwap, SignatureStatus,
+    SwapResult, TargetProfile, TrustPolicy, TrustVerifier, compare_target, is_nvidia_signer,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -241,7 +241,7 @@ impl BackupStore {
             version: metadata.version,
             created_unix,
         };
-        let mut index = self.load_index()?;
+        let mut index = self.load_validated_index(inspector)?;
         if let Some(existing) = index.records.iter_mut().find(|existing| {
             existing.sha256 == record.sha256 && existing.original_path == record.original_path
         }) {
@@ -264,6 +264,60 @@ impl BackupStore {
         } else {
             Ok(BackupIndex::default())
         }
+    }
+
+    /// Loads the backup index and validates every content-addressed object.
+    ///
+    /// # Errors
+    /// Returns an error when an entry escapes the object store or its hash or
+    /// recorded PE version no longer matches the stored object.
+    pub fn load_validated_index(
+        &self,
+        inspector: &dyn DllInspector,
+    ) -> Result<BackupIndex, CoreError> {
+        let index = self.load_index()?;
+        for record in &index.records {
+            let expected_path = self.root.join("objects").join(hex_hash(record.sha256));
+            if record.content_path != expected_path
+                || !expected_path.is_file()
+                || hash_file(&expected_path)? != record.sha256
+            {
+                return Err(CoreError::Validation(
+                    "backup index object path or hash is invalid".into(),
+                ));
+            }
+            let metadata = inspector.inspect(&expected_path)?;
+            if metadata.sha256 != record.sha256 || metadata.version != record.version {
+                return Err(CoreError::Validation(
+                    "backup index object metadata is invalid".into(),
+                ));
+            }
+        }
+        Ok(index)
+    }
+
+    /// Loads the backup index and requires every reusable object to retain a
+    /// valid NVIDIA signature in addition to its content and PE metadata.
+    ///
+    /// # Errors
+    /// Returns an error when structural validation or platform trust fails.
+    pub fn load_trusted_index(
+        &self,
+        inspector: &dyn DllInspector,
+        verifier: &dyn TrustVerifier,
+    ) -> Result<BackupIndex, CoreError> {
+        let index = self.load_validated_index(inspector)?;
+        for record in &index.records {
+            let trust = verifier.verify(&record.content_path, TrustPolicy::Strict)?;
+            if trust.signature != SignatureStatus::Trusted
+                || !trust.signer.as_deref().is_some_and(is_nvidia_signer)
+            {
+                return Err(CoreError::Validation(
+                    "backup index object failed NVIDIA trust validation".into(),
+                ));
+            }
+        }
+        Ok(index)
     }
 }
 
@@ -418,13 +472,24 @@ pub fn read_versioned_json<T: DeserializeOwned>(
     source: &Path,
     expected_schema: u32,
 ) -> Result<T, CoreError> {
+    read_versioned_json_bytes(&fs::read(source)?, expected_schema)
+}
+
+/// Decodes and validates a payload from an already-read versioned JSON envelope.
+///
+/// # Errors
+/// Returns an error when decoding or schema validation fails.
+pub fn read_versioned_json_bytes<T: DeserializeOwned>(
+    bytes: &[u8],
+    expected_schema: u32,
+) -> Result<T, CoreError> {
     #[derive(serde::Deserialize)]
     struct Envelope<T> {
         schema_version: u32,
         payload: T,
     }
-    let envelope: Envelope<T> = serde_json::from_reader(File::open(source)?)
-        .map_err(|error| CoreError::Validation(error.to_string()))?;
+    let envelope: Envelope<T> =
+        serde_json::from_slice(bytes).map_err(|error| CoreError::Validation(error.to_string()))?;
     if envelope.schema_version != expected_schema {
         return Err(CoreError::Validation(format!(
             "unsupported schema version {}",
@@ -446,7 +511,10 @@ fn hex_hash(hash: [u8; 32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DllInstallationId, DllMetadata, DllVersion, GameId, ReleaseId, SignatureStatus};
+    use crate::{
+        DllInstallationId, DllMetadata, DllVersion, GameId, ReleaseId, RevocationStatus,
+        SignatureStatus, TrustReport,
+    };
     use std::sync::Mutex;
     use tempfile::tempdir;
 
@@ -458,6 +526,18 @@ mod tests {
                 sha256: hash_file(path)?,
                 signature: SignatureStatus::Trusted,
                 x86_64: true,
+            })
+        }
+    }
+
+    struct Signer(&'static str);
+    impl TrustVerifier for Signer {
+        fn verify(&self, _path: &Path, _policy: TrustPolicy) -> Result<TrustReport, CoreError> {
+            Ok(TrustReport {
+                signature: SignatureStatus::Trusted,
+                signer: Some(self.0.into()),
+                revocation: RevocationStatus::Verified,
+                native_failure: None,
             })
         }
     }
@@ -838,12 +918,38 @@ mod tests {
     }
 
     #[test]
+    fn backup_reuse_requires_a_trusted_nvidia_signer() {
+        let dir = tempdir().unwrap();
+        let original = dir.path().join("nvngx_dlss.dll");
+        fs::write(&original, b"signed bytes").unwrap();
+        let backups = BackupStore::new(dir.path().join("backups"));
+        backups
+            .commit(&original, hash_file(&original).unwrap(), &BytesInspector, 1)
+            .unwrap();
+
+        assert!(
+            backups
+                .load_trusted_index(&BytesInspector, &Signer("NVIDIA Corporation"))
+                .is_ok()
+        );
+        assert!(
+            backups
+                .load_trusted_index(&BytesInspector, &Signer("Example Publisher"))
+                .is_err()
+        );
+    }
+
+    #[test]
     fn versioned_json_rejects_other_schema() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("state.json");
         write_versioned_json(&path, 1, &vec!["value"]).unwrap();
         let loaded: Vec<String> = read_versioned_json(&path, 1).unwrap();
         assert_eq!(loaded, ["value"]);
+        let bytes = fs::read(&path).unwrap();
+        let loaded: Vec<String> = read_versioned_json_bytes(&bytes, 1).unwrap();
+        assert_eq!(loaded, ["value"]);
         assert!(read_versioned_json::<Vec<String>>(&path, 2).is_err());
+        assert!(read_versioned_json_bytes::<Vec<String>>(&bytes, 2).is_err());
     }
 }

@@ -49,7 +49,12 @@ fn elevated_helper() {
             tracing::error!("missing elevated helper plan");
             std::process::exit(2);
         };
-        if let Err(error) = dlss_platform::windows::run_elevated_helper(std::path::Path::new(&plan))
+        let Some(plan_hash) = arguments.next().and_then(|value| parse_sha256(&value)) else {
+            tracing::error!("missing or invalid elevated helper plan digest");
+            std::process::exit(2);
+        };
+        if let Err(error) =
+            dlss_platform::windows::run_elevated_helper(std::path::Path::new(&plan), plan_hash)
         {
             // The plan could not be validated far enough to write a result file,
             // so signal failure through the exit code. When the plan did parse,
@@ -60,6 +65,19 @@ fn elevated_helper() {
     }
     #[cfg(not(windows))]
     tracing::warn!("elevated helper is unavailable on this platform");
+}
+
+#[cfg(windows)]
+fn parse_sha256(value: &std::ffi::OsStr) -> Option<[u8; 32]> {
+    let value = value.to_str()?;
+    if value.len() != 64 {
+        return None;
+    }
+    let mut hash = [0_u8; 32];
+    for (index, byte) in hash.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
+    }
+    Some(hash)
 }
 
 struct DlssApp {
@@ -252,7 +270,10 @@ impl DlssApp {
         let backup_result = dlss_platform::windows::WindowsKnownDirectories
             .local_app_data()
             .and_then(|base| {
-                dlss_core::BackupStore::new(base.join("DLSS Updater/backups")).load_index()
+                dlss_core::BackupStore::new(base.join("DLSS Updater/backups")).load_trusted_index(
+                    &dlss_platform::windows::WindowsDllInspector,
+                    &dlss_platform::windows::WindowsTrustVerifier,
+                )
             })
             .map(|index| index.records);
         #[cfg(windows)]
@@ -1058,7 +1079,10 @@ impl DlssApp {
         match dlss_platform::windows::WindowsKnownDirectories
             .local_app_data()
             .and_then(|base| {
-                dlss_core::BackupStore::new(base.join("DLSS Updater/backups")).load_index()
+                dlss_core::BackupStore::new(base.join("DLSS Updater/backups")).load_trusted_index(
+                    &dlss_platform::windows::WindowsDllInspector,
+                    &dlss_platform::windows::WindowsTrustVerifier,
+                )
             }) {
             Ok(index) => self.backups = index.records,
             Err(error) => {

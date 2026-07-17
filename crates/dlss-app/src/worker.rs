@@ -315,27 +315,32 @@ fn profile_command(
         return;
     };
     let progress_events = events.clone();
-    let mut cached: Vec<_> = state
-        .catalog
-        .releases
-        .iter()
-        .flat_map(|release| release.dlls.iter().cloned())
-        .collect();
-    cached.extend(dlss_core::imported_catalog_dlls(&state.imports));
+    // Persisted catalog records are display metadata, not a trust anchor. Every
+    // selected official release is revalidated from its prepared cache before
+    // any of its paths or hashes can enter an operation plan.
     #[cfg(windows)]
-    for release_id in profile
+    let mut cached = dlss_core::imported_catalog_dlls(&state.imports);
+    #[cfg(not(windows))]
+    let cached = dlss_core::imported_catalog_dlls(&state.imports);
+    #[cfg(windows)]
+    let mut selected_releases = profile
         .targets
         .values()
         .filter_map(|desired| match desired {
-            dlss_core::DesiredDll::Cached { release, .. } => Some(release),
+            dlss_core::DesiredDll::Cached { release, .. } => Some(release.clone()),
             _ => None,
         })
+        .collect::<Vec<_>>();
+    #[cfg(windows)]
     {
-        if !cached.iter().any(|dll| &dll.release == release_id) {
+        selected_releases.sort();
+        selected_releases.dedup();
+        for release_id in selected_releases {
             let asset = state
                 .assets
                 .iter()
-                .find(|asset| &asset.release.id == release_id)
+                .find(|asset| asset.release.id == release_id)
+                .cloned()
                 .ok_or_else(|| {
                     WorkerError::State(format!(
                         "selected official release {} is unavailable",
@@ -343,7 +348,7 @@ fn profile_command(
                     ))
                 });
             match asset.and_then(|asset| {
-                inspect_release(asset, |release_state, received, total| {
+                inspect_release(&asset, |release_state, received, total| {
                     progress_events.send(Event::ReleaseProgress {
                         id: release_id.clone(),
                         state: release_state,
@@ -459,7 +464,14 @@ fn add_root_command(root: &std::path::Path, events: &EventSink, state: &mut Work
 
 #[cfg(windows)]
 fn load_imports(events: &EventSink) -> dlss_core::ImportIndex {
-    match import_store().and_then(|store| store.load_index().map_err(WorkerError::from)) {
+    match import_store().and_then(|store| {
+        store
+            .load_validated_index(
+                &dlss_platform::windows::WindowsDllInspector,
+                &dlss_platform::windows::WindowsTrustVerifier,
+            )
+            .map_err(WorkerError::from)
+    }) {
         Ok(index) => index,
         Err(error) => {
             events.send(Event::Warning(format!(
@@ -767,7 +779,10 @@ fn apply_profile(
     progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<UpgradeReport> {
     let (base, catalog_dlls) = prepare_release(asset, progress)?;
-    let backup_index = dlss_core::BackupStore::new(base.join("backups")).load_index()?;
+    let backup_index = dlss_core::BackupStore::new(base.join("backups")).load_trusted_index(
+        &dlss_platform::windows::WindowsDllInspector,
+        &dlss_platform::windows::WindowsTrustVerifier,
+    )?;
     let plan = dlss_core::plan_target_profile(
         operation_nonce(),
         &game.dlls,
@@ -790,7 +805,11 @@ fn prepare_release(
     let archive = base.join("cache/archives").join(format!("{component}.zip"));
     let extracted = base.join("cache/releases").join(component);
     tracing::info!(release = %asset.release.tag, archive = %archive.display(), "preparing release");
-    if let Some(prepared) = dlss_catalog::load_prepared_release(&extracted, &asset.release.id)? {
+    let inspector = dlss_platform::windows::WindowsDllInspector;
+    let verifier = dlss_platform::windows::WindowsTrustVerifier;
+    if let Some(prepared) =
+        dlss_catalog::load_prepared_release(&extracted, &asset.release.id, &inspector, &verifier)?
+    {
         tracing::info!(release = %asset.release.tag, prepared = %extracted.display(), dlls = prepared.dlls.len(), "prepared release cache hit");
         return Ok((base, prepared));
     }
@@ -819,8 +838,6 @@ fn prepare_release(
         asset.size,
         Some(asset.size),
     );
-    let inspector = dlss_platform::windows::WindowsDllInspector;
-    let verifier = dlss_platform::windows::WindowsTrustVerifier;
     let extract = |archive: &std::path::Path| {
         dlss_catalog::validate_and_extract(
             archive,

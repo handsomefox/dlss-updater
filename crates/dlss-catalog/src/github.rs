@@ -81,11 +81,12 @@ impl GithubCatalogClient {
         let _ = rustls::crypto::ring::default_provider().install_default();
         Ok(Self {
             // Release archives are hundreds of megabytes. The blocking client's
-            // default 30s timeout covers the whole body read and would abort large
-            // downloads, so disable it and bound only connection establishment. The
-            // streaming size cap in `download` remains the safety limit.
+            // The default 30s timeout covers the whole body read and would abort
+            // large downloads. Use a finite release-sized deadline so a connected
+            // peer still cannot stall the worker forever; the streaming size cap in
+            // `download` remains the total-size safety limit.
             client: Client::builder()
-                .timeout(None)
+                .timeout(Duration::from_mins(30))
                 .connect_timeout(Duration::from_secs(30))
                 .build()?,
             releases_url: RELEASES_URL.into(),

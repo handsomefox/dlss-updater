@@ -69,7 +69,7 @@ impl ImportStore {
                 "import is not an x86-64 PE DLL".into(),
             ));
         }
-        let version = metadata
+        let _version = metadata
             .version
             .ok_or_else(|| CoreError::Validation("import has no version resource".into()))?;
         let trust = verifier.verify(source, TrustPolicy::Strict)?;
@@ -78,7 +78,7 @@ impl ImportStore {
                 "import signature is not trusted".into(),
             ));
         }
-        let signer = trust
+        let _signer = trust
             .signer
             .filter(|subject| is_nvidia_signer(subject))
             .ok_or_else(|| {
@@ -96,6 +96,27 @@ impl ImportStore {
             copy_flush_hash(source, &temporary, sha256)?;
             fs::rename(&temporary, &content_path)?;
         }
+        let stored_metadata = inspector.inspect(&content_path)?;
+        if !stored_metadata.x86_64 || stored_metadata.sha256 != sha256 {
+            return Err(CoreError::Validation(
+                "stored import failed PE or hash validation".into(),
+            ));
+        }
+        let version = stored_metadata
+            .version
+            .ok_or_else(|| CoreError::Validation("stored import has no version resource".into()))?;
+        let stored_trust = verifier.verify(&content_path, TrustPolicy::Strict)?;
+        if stored_trust.signature != SignatureStatus::Trusted {
+            return Err(CoreError::Validation(
+                "stored import signature is not trusted".into(),
+            ));
+        }
+        let signer = stored_trust
+            .signer
+            .filter(|subject| is_nvidia_signer(subject))
+            .ok_or_else(|| {
+                CoreError::Validation("stored import is not signed by NVIDIA Corporation".into())
+            })?;
         let record = ImportedDllRecord {
             file_name: file_name.to_os_string(),
             version,
@@ -104,7 +125,7 @@ impl ImportStore {
             imported_unix,
             content_path,
         };
-        let mut index = self.load_index()?;
+        let mut index = self.load_validated_index(inspector, verifier)?;
         if let Some(existing) = index.records.iter_mut().find(|item| item.sha256 == sha256) {
             existing.clone_from(&record);
         } else {
@@ -125,6 +146,49 @@ impl ImportStore {
         } else {
             Ok(ImportIndex::default())
         }
+    }
+
+    /// Loads the import index and revalidates every object before reuse.
+    ///
+    /// # Errors
+    /// Returns an error when an index entry escapes the object store or its
+    /// name, hash, PE metadata, version, or NVIDIA signature no longer agree.
+    pub fn load_validated_index(
+        &self,
+        inspector: &dyn DllInspector,
+        verifier: &dyn TrustVerifier,
+    ) -> Result<ImportIndex, CoreError> {
+        let index = self.load_index()?;
+        for record in &index.records {
+            if DllKind::classify(&record.file_name).is_none() {
+                return Err(CoreError::Validation(
+                    "import index contains an unmanaged DLL name".into(),
+                ));
+            }
+            let expected_path = self.root.join("objects").join(hex_hash(record.sha256));
+            if record.content_path != expected_path
+                || !expected_path.is_file()
+                || expected_path.metadata()?.len() > MAX_IMPORTED_DLL_BYTES
+                || hash_file(&expected_path)? != record.sha256
+            {
+                return Err(CoreError::Validation(
+                    "import index object path or hash is invalid".into(),
+                ));
+            }
+            let metadata = inspector.inspect(&expected_path)?;
+            let trust = verifier.verify(&expected_path, TrustPolicy::Strict)?;
+            if !metadata.x86_64
+                || metadata.version != Some(record.version)
+                || metadata.sha256 != record.sha256
+                || trust.signature != SignatureStatus::Trusted
+                || !trust.signer.as_deref().is_some_and(is_nvidia_signer)
+            {
+                return Err(CoreError::Validation(
+                    "import index object failed NVIDIA trust validation".into(),
+                ));
+            }
+        }
+        Ok(index)
     }
 
     /// Removes one imported object and its index entry.

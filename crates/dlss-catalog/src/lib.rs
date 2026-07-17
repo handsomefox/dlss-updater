@@ -49,6 +49,8 @@ pub struct PreparedReleaseManifest {
 pub fn load_prepared_release(
     destination: &Path,
     release: &ReleaseId,
+    inspector: &dyn DllInspector,
+    trust: &dyn TrustVerifier,
 ) -> Result<Option<ValidatedRelease>, CatalogError> {
     let manifest_path = destination.join(PREPARED_MANIFEST);
     if !manifest_path.exists() {
@@ -62,26 +64,63 @@ pub fn load_prepared_release(
     if manifest.release != *release || manifest.dlls.is_empty() {
         return Ok(None);
     }
+    let canonical_destination = destination.canonicalize()?;
     let mut dlls = Vec::with_capacity(manifest.dlls.len());
+    let mut used_revocation_fallback = false;
     for entry in manifest.dlls {
-        if entry.source.is_absolute() || entry.source.components().count() != 1 {
+        if entry.source.is_absolute()
+            || entry.source.components().count() != 1
+            || Path::new(&entry.file_name).components().count() != 1
+            || entry.source.as_path() != Path::new(&entry.file_name)
+        {
             return Ok(None);
         }
         let source = destination.join(&entry.source);
-        if !source.is_file() || sha256_file(&source)? != entry.sha256 {
+        let Ok(canonical_source) = source.canonicalize() else {
+            return Ok(None);
+        };
+        if canonical_source.parent() != Some(canonical_destination.as_path())
+            || !canonical_source.is_file()
+            || sha256_file(&canonical_source)? != entry.sha256
+        {
             return Ok(None);
         }
+        let Ok(metadata) = inspector.inspect(&canonical_source) else {
+            return Ok(None);
+        };
+        if !metadata.x86_64
+            || metadata.version != Some(entry.version)
+            || metadata.sha256 != entry.sha256
+        {
+            return Ok(None);
+        }
+        let Ok(report) = trust.verify(&canonical_source, TrustPolicy::OfficialNvidiaCatalog) else {
+            return Ok(None);
+        };
+        if report.signature != SignatureStatus::Trusted
+            || !report
+                .signer
+                .as_deref()
+                .is_some_and(dlss_core::is_nvidia_signer)
+        {
+            return Ok(None);
+        }
+        used_revocation_fallback |= report.revocation == RevocationStatus::UnavailableFallback;
         dlls.push(CatalogDll {
             file_name: entry.file_name.into(),
             version: entry.version,
             sha256: entry.sha256,
-            source,
+            source: canonical_source,
             release: release.clone(),
         });
     }
     Ok(Some(ValidatedRelease {
         dlls,
-        validation: manifest.validation,
+        validation: if used_revocation_fallback {
+            ReleaseValidation::RevocationUnavailableFallback
+        } else {
+            ReleaseValidation::Full
+        },
     }))
 }
 
@@ -132,6 +171,7 @@ impl CatalogCacheIndex {
 pub const MAX_ARCHIVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub const MAX_ENTRIES: usize = 4096;
 pub const MAX_DLL_BYTES: u64 = 256 * 1024 * 1024;
+pub const MAX_EXTRACTED_DLL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CatalogError {
@@ -271,6 +311,7 @@ fn extract_to_staging(
     let mut extracted = Vec::new();
     let mut rejections = Vec::new();
     let mut used_revocation_fallback = false;
+    let mut extracted_bytes = 0_u64;
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index)?;
         let raw_name = entry.name().replace('\\', "/");
@@ -302,7 +343,11 @@ fn extract_to_staging(
         // selection can reject an otherwise valid PE when staged as
         // `*.dll.partial`.
         let temporary = destination.join(format!(".partial-{}", parts[2]));
-        let sha256 = copy_staged_candidate(&mut entry, &temporary)?;
+        let (sha256, written) = copy_staged_candidate(&mut entry, &temporary)?;
+        extracted_bytes = extracted_bytes
+            .checked_add(written)
+            .filter(|total| *total <= MAX_EXTRACTED_DLL_BYTES)
+            .ok_or(CatalogError::TooLarge)?;
         let metadata = inspector
             .inspect(&temporary)
             .map_err(|e| CatalogError::Inspection(parts[2].into(), e.to_string()))?;
@@ -356,7 +401,10 @@ fn extract_to_staging(
     })
 }
 
-fn copy_staged_candidate(reader: &mut impl Read, path: &Path) -> Result<[u8; 32], CatalogError> {
+fn copy_staged_candidate(
+    reader: &mut impl Read,
+    path: &Path,
+) -> Result<([u8; 32], u64), CatalogError> {
     let mut file = File::create(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
@@ -378,7 +426,7 @@ fn copy_staged_candidate(reader: &mut impl Read, path: &Path) -> Result<[u8; 32]
     file.flush()?;
     file.sync_all()?;
     drop(file);
-    Ok(hasher.finalize().into())
+    Ok((hasher.finalize().into(), written))
 }
 
 fn verify_catalog_candidate(
@@ -817,6 +865,39 @@ mod tests {
         assert!(!output.join("stale.dll").exists());
         assert_eq!(dlls.dlls[0].source, output.join("sl.common.dll"));
         assert!(dlls.dlls[0].source.exists());
+    }
+
+    #[test]
+    fn prepared_release_revalidates_cached_signature_and_metadata() {
+        let directory = tempdir().unwrap();
+        let output = directory.path().join("release");
+        fs::create_dir(&output).unwrap();
+        let source = output.join("sl.common.dll");
+        fs::write(&source, b"untrusted").unwrap();
+        let sha256 = sha256_file(&source).unwrap();
+        let release = ReleaseId("r".into());
+        let manifest = PreparedReleaseManifest {
+            release: release.clone(),
+            validation: ReleaseValidation::Full,
+            dlls: vec![PreparedReleaseEntry {
+                file_name: "sl.common.dll".into(),
+                version: DllVersion::new(2, 12, 0, 9),
+                sha256,
+                source: PathBuf::from("sl.common.dll"),
+            }],
+        };
+        dlss_core::write_versioned_json(
+            &output.join(PREPARED_MANIFEST),
+            PREPARED_RELEASE_SCHEMA_VERSION,
+            &manifest,
+        )
+        .unwrap();
+
+        assert!(
+            load_prepared_release(&output, &release, &Inspector, &TrustByContents)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

@@ -5,11 +5,12 @@ use dlss_core::{
     AtomicFileReplacer, BackupStore, BatchResult, CoreError, DLSS_INDICATOR_TOOL_ID,
     DiscoveryOutcome, DiscoveryStatus, DllInspector, DllMetadata, DllVersion, ElevatedFilePlan,
     ElevatedHelperPlan, GameId, GameInstall, GameLocator, KnownDirectories, NativeTrustFailure,
-    PlatformCapabilities, PrivilegeBroker, RegistryValueSnapshot, RegistryView, RevocationStatus,
-    SignatureStatus, StoreDiscoveryReport, StoreKind, SystemToolDefinition, SystemToolId,
-    SystemToolProvider, SystemToolScope, SystemToolState, ToolChangePlan, ToolChangeResult,
-    ToolRestorePoint, TrustPolicy, TrustReport, TrustVerifier, execute_plan, hash_file,
-    indicator_state, now_unix, read_versioned_json, write_versioned_json,
+    OperationPlan, PlannedSwap, PlatformCapabilities, PrivilegeBroker, RegistryValueSnapshot,
+    RegistryView, RevocationStatus, SignatureStatus, StoreDiscoveryReport, StoreKind,
+    SystemToolDefinition, SystemToolId, SystemToolProvider, SystemToolScope, SystemToolState,
+    ToolChangePlan, ToolChangeResult, ToolRestorePoint, TrustPolicy, TrustReport, TrustVerifier,
+    execute_plan, hash_file, indicator_state, now_unix, read_versioned_json_bytes,
+    write_versioned_json,
 };
 use object::Object;
 use sha2::{Digest, Sha256};
@@ -73,6 +74,15 @@ pub fn capabilities() -> PlatformCapabilities {
 
 fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+fn hex_hash(hash: [u8; 32]) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::with_capacity(64);
+    for byte in hash {
+        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    encoded
 }
 
 fn windows_error(error: &windows::core::Error) -> CoreError {
@@ -690,7 +700,8 @@ impl PrivilegeBroker for WindowsPrivilegeBroker {
     fn run_elevated(&self, plan: &Path) -> Result<(), CoreError> {
         let executable = std::env::current_exe()?;
         let executable = wide(&executable);
-        let parameters = format!("--elevated-helper \"{}\"", plan.display());
+        let plan_hash = hex_hash(hash_file(plan)?);
+        let parameters = format!("--elevated-helper \"{}\" {plan_hash}", plan.display());
         let parameters: Vec<u16> = parameters.encode_utf16().chain(Some(0)).collect();
         let execute_size = u32::try_from(size_of::<SHELLEXECUTEINFOW>())
             .map_err(|_| CoreError::Validation("shell structure is too large".into()))?;
@@ -915,7 +926,10 @@ pub fn snapshot_hash(snapshot: &RegistryValueSnapshot) -> [u8; 32] {
 /// # Errors
 /// Returns an error when helper paths, the serialized plan, independent plan
 /// validation, execution, or result persistence fails.
-pub fn run_elevated_helper(plan_path: &Path) -> Result<(), CoreError> {
+pub fn run_elevated_helper(
+    plan_path: &Path,
+    expected_plan_hash: [u8; 32],
+) -> Result<(), CoreError> {
     tracing::info!(plan = %plan_path.display(), "elevated helper started");
     let local = WindowsKnownDirectories.local_app_data()?;
     let base = local.join("DLSS Updater");
@@ -930,7 +944,13 @@ pub fn run_elevated_helper(plan_path: &Path) -> Result<(), CoreError> {
             "helper plan is outside the private plan directory".into(),
         ));
     }
-    let plan: ElevatedHelperPlan = read_versioned_json(&canonical_plan, 1)?;
+    let plan_bytes = fs::read(&canonical_plan)?;
+    if <[u8; 32]>::from(Sha256::digest(&plan_bytes)) != expected_plan_hash {
+        return Err(CoreError::Validation(
+            "elevated helper plan digest mismatch".into(),
+        ));
+    }
+    let plan: ElevatedHelperPlan = read_versioned_json_bytes(&plan_bytes, 1)?;
     let result = match plan {
         ElevatedHelperPlan::SystemTool(plan) => {
             // Validate the result path before doing anything else so that any
@@ -960,9 +980,9 @@ pub fn run_elevated_helper(plan_path: &Path) -> Result<(), CoreError> {
                 if plan.operation.nonce != plan.nonce {
                     return Err("file plan nonce mismatch".into());
                 }
-                validate_file_plan(&plan, &base).map_err(|error| error.to_string())?;
+                let staged = validate_file_plan(&plan, &base).map_err(|error| error.to_string())?;
                 Ok(execute_plan(
-                    &plan.operation,
+                    &staged.operation,
                     &WindowsDllInspector,
                     &WindowsAtomicFileReplacer,
                     &BackupStore::new(base.join("backups")),
@@ -998,77 +1018,184 @@ fn validate_helper_paths(
     Ok(())
 }
 
-fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<(), CoreError> {
+struct StagedFilePlan {
+    operation: OperationPlan,
+    sources: Vec<PathBuf>,
+}
+
+impl Drop for StagedFilePlan {
+    fn drop(&mut self) {
+        for source in &self.sources {
+            if let Err(error) = fs::remove_file(source)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = %source.display(), %error, "could not remove elevated source staging file");
+            }
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "the elevated boundary keeps all plan validation visible in one audit path"
+)]
+fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFilePlan, CoreError> {
     let game_root = plan.game_root.canonicalize()?;
-    let known_game = WindowsGameLocator
+    let discovered_game = WindowsGameLocator
         .discover()?
         .games
         .into_iter()
-        .any(|game| {
+        .find(|game| {
             game.id == plan.game_id && game.root.canonicalize().ok() == Some(game_root.clone())
         });
-    let known_manual = plan.game_id.0.starts_with("manual:")
-        && crate::manual_install(&game_root).is_ok_and(|game| game.id == plan.game_id);
-    if !known_game && !known_manual {
+    let manual_game = (plan.game_id.0.starts_with("manual:"))
+        .then(|| crate::manual_install(&game_root))
+        .transpose()?
+        .filter(|game| game.id == plan.game_id);
+    if discovered_game.is_none() && manual_game.is_none() {
         return Err(CoreError::Validation(
             "file plan does not belong to the declared game".into(),
         ));
     }
+    let installations = crate::scan_game(&plan.game_id, &game_root, &WindowsDllInspector)
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
     let releases = base.join("cache/releases").canonicalize()?;
     let backups = base.join("backups/objects");
     let backups = backups.canonicalize().ok();
     let imports = base.join("imports/objects");
     let imports = imports.canonicalize().ok();
-    for swap in &plan.operation.swaps {
+    let mut staged_sources = Vec::with_capacity(plan.operation.swaps.len());
+    let mut swaps = Vec::with_capacity(plan.operation.swaps.len());
+    for (index, swap) in plan.operation.swaps.iter().enumerate() {
+        if swap.game != plan.game_id {
+            return Err(CoreError::Validation("file plan game ID mismatch".into()));
+        }
         let target = swap.target_path.canonicalize()?;
         if !target.starts_with(&game_root) {
             return Err(CoreError::Validation(
                 "target is outside the game root".into(),
             ));
         }
+        if target
+            .file_name()
+            .and_then(dlss_core::DllKind::classify)
+            .is_none()
+        {
+            return Err(CoreError::Validation(
+                "target is not a managed NVIDIA DLL".into(),
+            ));
+        }
+        let installation = installations
+            .iter()
+            .find(|installation| installation.id == swap.installation)
+            .ok_or_else(|| {
+                CoreError::Validation("target is not a discovered DLL installation".into())
+            })?;
+        if installation.game_id != plan.game_id
+            || installation.path.canonicalize()? != target
+            || installation.metadata.sha256 != swap.expected_sha256
+        {
+            return Err(CoreError::Validation(
+                "target does not match the discovered DLL installation".into(),
+            ));
+        }
         let source = swap.source_path.canonicalize()?;
         let imported_source = imports
             .as_ref()
             .is_some_and(|root| source.starts_with(root));
-        let trusted_source = source.starts_with(&releases)
-            || backups
-                .as_ref()
-                .is_some_and(|root| source.starts_with(root))
-            || imported_source;
-        if !trusted_source || hash_file(&source)? != swap.source_sha256 {
+        let backup_source = backups
+            .as_ref()
+            .is_some_and(|root| source.starts_with(root));
+        let release_source = source.starts_with(&releases);
+        if (!release_source && !backup_source && !imported_source)
+            || hash_file(&source)? != swap.source_sha256
+        {
             return Err(CoreError::Validation(
                 "source is outside the validated cache".into(),
             ));
         }
-        if imported_source {
-            if swap
-                .target_path
-                .file_name()
-                .and_then(dlss_core::DllKind::classify)
-                .is_none()
-            {
-                return Err(CoreError::Validation(
-                    "import target is not a managed DLL".into(),
-                ));
-            }
-            let metadata = WindowsDllInspector.inspect(&source)?;
-            let verifier = WindowsTrustVerifier;
-            let trust = verifier.verify(&source, TrustPolicy::Strict)?;
-            if !metadata.x86_64
-                || metadata.version.is_none()
-                || trust.signature != SignatureStatus::Trusted
-                || !trust
-                    .signer
-                    .as_deref()
-                    .is_some_and(dlss_core::is_nvidia_signer)
-            {
-                return Err(CoreError::Validation(
-                    "imported source failed elevated trust validation".into(),
-                ));
-            }
-        }
+        let policy = if release_source {
+            TrustPolicy::OfficialNvidiaCatalog
+        } else {
+            TrustPolicy::Strict
+        };
+        validate_nvidia_dll(&source, policy)?;
+        let staged = stage_elevated_source(
+            &source,
+            &target,
+            swap.source_sha256,
+            &plan.nonce,
+            index,
+            policy,
+        )?;
+        staged_sources.push(staged.clone());
+        let mut staged_swap: PlannedSwap = swap.clone();
+        staged_swap.target_path = target;
+        staged_swap.source_path = staged;
+        swaps.push(staged_swap);
+    }
+    Ok(StagedFilePlan {
+        operation: OperationPlan {
+            nonce: plan.operation.nonce.clone(),
+            swaps,
+        },
+        sources: staged_sources,
+    })
+}
+
+fn validate_nvidia_dll(path: &Path, policy: TrustPolicy) -> Result<(), CoreError> {
+    let metadata = WindowsDllInspector.inspect(path)?;
+    let trust = WindowsTrustVerifier.verify(path, policy)?;
+    if !metadata.x86_64
+        || metadata.version.is_none()
+        || trust.signature != SignatureStatus::Trusted
+        || !trust
+            .signer
+            .as_deref()
+            .is_some_and(dlss_core::is_nvidia_signer)
+    {
+        return Err(CoreError::Validation(
+            "source failed elevated NVIDIA trust validation".into(),
+        ));
     }
     Ok(())
+}
+
+fn stage_elevated_source(
+    source: &Path,
+    target: &Path,
+    expected_hash: [u8; 32],
+    nonce: &str,
+    index: usize,
+    policy: TrustPolicy,
+) -> Result<PathBuf, CoreError> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| CoreError::Validation("target has no parent directory".into()))?;
+    let staged = parent.join(format!(".dlss-source-{nonce}-{index}.dll"));
+    let result = (|| {
+        let mut input = File::open(source)?;
+        let mut output = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&staged)?;
+        io::copy(&mut input, &mut output)?;
+        output.flush()?;
+        output.sync_all()?;
+        drop(output);
+        if hash_file(&staged)? != expected_hash {
+            return Err(CoreError::Validation(
+                "elevated source staging hash mismatch".into(),
+            ));
+        }
+        validate_nvidia_dll(&staged, policy)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&staged);
+        return Err(error);
+    }
+    Ok(staged)
 }
 
 #[cfg(test)]
