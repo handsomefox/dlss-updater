@@ -467,7 +467,14 @@ fn verify_catalog_candidate(
 pub(crate) fn sha256_file(path: &Path) -> io::Result<[u8; 32]> {
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
-    io::copy(&mut file, &mut hash)?;
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
     Ok(hash.finalize().into())
 }
 

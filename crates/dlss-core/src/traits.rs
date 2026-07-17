@@ -6,7 +6,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 // These independent flags describe OS facilities, not one compound state.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the independent trust results intentionally remain explicit booleans"
+)]
 pub struct PlatformCapabilities {
     pub game_discovery: bool,
     pub dll_versions: bool,

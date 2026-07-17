@@ -297,7 +297,10 @@ struct ApiAsset {
     digest: Option<String>,
 }
 
-#[allow(clippy::case_sensitive_file_extension_comparisons)]
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "official release asset names are matched with a normalized lowercase string"
+)]
 fn select_asset(release: ApiRelease) -> Option<OfficialAsset> {
     if release.draft || release.prerelease {
         return None;

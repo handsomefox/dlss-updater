@@ -10,19 +10,19 @@ repository = "https://github.com/handsomefox/dlss-updater"
 description = "A Windows desktop app for safely updating official NVIDIA DLSS and Streamline DLLs"
 
 [workspace.dependencies]
-crossbeam-channel = "0.5"
-eframe = { version = "0.35", default-features = false, features = ["default_fonts", "glow", "persistence", "wayland", "x11"] }
-egui_extras = "0.35"
-jiff = "0.2"
-object = { version = "0.37", features = ["pe"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.10"
-thiserror = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-walkdir = "2"
-zip = { version = "5", default-features = false, features = ["deflate"] }
+crossbeam-channel = "=0.5.16"
+eframe = { version = "=0.35.0", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+egui_extras = "=0.35.0"
+jiff = "=0.2.32"
+object = { version = "=0.37.3", features = ["pe"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+sha2 = "=0.11.0"
+thiserror = "=2.0.18"
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+walkdir = "=2.5.0"
+zip = { version = "=8.6.0", default-features = false, features = ["deflate"] }
 
 [profile.release]
 lto = "thin"
@@ -30,7 +30,18 @@ strip = true
 
 [workspace.lints.rust]
 unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "warn"
 unused_qualifications = "warn"
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+exit = "warn"
+multiple_unsafe_ops_per_block = "warn"
+print_stderr = "warn"
+print_stdout = "warn"
+todo = "warn"
+undocumented_unsafe_blocks = "warn"
+unimplemented = "warn"

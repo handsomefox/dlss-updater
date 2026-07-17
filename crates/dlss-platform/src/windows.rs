@@ -398,6 +398,10 @@ fn is_missing_registry_error(code: i32) -> bool {
     matches!(code, FILE_NOT_FOUND | PATH_NOT_FOUND)
 }
 
+#[expect(
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "the version-resource calls share buffers and validated output pointers"
+)]
 fn file_version(path: &Path) -> Result<Option<DllVersion>, CoreError> {
     let path = wide(path);
     // SAFETY: `path` is NUL-terminated and all output buffers live across each call.
@@ -474,6 +478,10 @@ impl NativeTrustResult {
 }
 
 impl WindowsTrustVerifier {
+    #[expect(
+        clippy::multiple_unsafe_ops_per_block,
+        reason = "the trust provider state must remain live through verification and cleanup"
+    )]
     fn verify_once(path: &Path, check_revocation: bool) -> Result<NativeTrustResult, CoreError> {
         let path = wide(path);
         let file_size = u32::try_from(size_of::<WINTRUST_FILE_INFO>())
@@ -576,6 +584,10 @@ fn resolve_trust(
     )
 }
 
+#[expect(
+    clippy::undocumented_unsafe_blocks,
+    reason = "the function-level safety invariant covers the provider-owned pointer chain"
+)]
 unsafe fn signer_subject_from_state(state: HANDLE) -> Option<String> {
     // SAFETY: the successful WinVerifyTrust provider state remains open until
     // this function returns.
@@ -629,6 +641,10 @@ impl KnownDirectories for WindowsKnownDirectories {
     }
 }
 
+#[expect(
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "the COM allocation must remain live through conversion and then be freed once"
+)]
 fn known_folder(id: &windows::core::GUID) -> Result<PathBuf, CoreError> {
     // SAFETY: the returned COM allocation is converted before being freed once.
     unsafe {
@@ -697,6 +713,10 @@ impl AtomicFileReplacer for WindowsAtomicFileReplacer {
 pub struct WindowsPrivilegeBroker;
 
 impl PrivilegeBroker for WindowsPrivilegeBroker {
+    #[expect(
+        clippy::multiple_unsafe_ops_per_block,
+        reason = "the elevated process handle is created, waited on, and closed as one transaction"
+    )]
     fn run_elevated(&self, plan: &Path) -> Result<(), CoreError> {
         let executable = std::env::current_exe()?;
         let executable = wide(&executable);

@@ -49,7 +49,10 @@ fn today() -> String {
     jiff::Zoned::now().strftime("%Y-%m-%d").to_string()
 }
 
-#[allow(clippy::case_sensitive_file_extension_comparisons)]
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "diagnostic file names are matched with a normalized lowercase string"
+)]
 fn prune_old_logs(directory: &std::path::Path) {
     let Ok(entries) = fs::read_dir(directory) else {
         return;
