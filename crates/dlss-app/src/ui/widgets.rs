@@ -10,12 +10,13 @@ pub(crate) fn icon_text(icon: &str, label: &str) -> egui::WidgetText {
 
 fn colored_icon_text(icon: &str, label: &str, color: Option<egui::Color32>) -> egui::WidgetText {
     let mut job = egui::text::LayoutJob::default();
+    let color = color.unwrap_or(egui::Color32::PLACEHOLDER);
     job.append(
         icon,
         0.0,
         egui::TextFormat {
             font_id: theme::icon_font(15.0),
-            color: color.unwrap_or_default(),
+            color,
             ..Default::default()
         },
     );
@@ -25,7 +26,7 @@ fn colored_icon_text(icon: &str, label: &str, color: Option<egui::Color32>) -> e
             5.0,
             egui::TextFormat {
                 font_id: egui::FontId::new(14.0, egui::FontFamily::Proportional),
-                color: color.unwrap_or_default(),
+                color,
                 ..Default::default()
             },
         );
@@ -185,6 +186,35 @@ pub(crate) fn banner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn section_colors(text: egui::WidgetText) -> Vec<egui::Color32> {
+        let egui::WidgetText::LayoutJob(job) = text else {
+            panic!("icon text must remain a layout job");
+        };
+        job.sections
+            .iter()
+            .map(|section| section.format.color)
+            .collect()
+    }
+
+    #[test]
+    fn icon_text_inherits_widget_foreground_unless_overridden() {
+        let inherited = section_colors(icon_text(icons::SPARKLE, "Update DLSS"));
+        assert_eq!(inherited.len(), 2);
+        assert!(
+            inherited
+                .iter()
+                .all(|color| *color == egui::Color32::PLACEHOLDER)
+        );
+
+        let explicit = section_colors(colored_icon_text(
+            icons::SPARKLE,
+            "Update DLSS",
+            Some(theme::TEXT_ON_ACCENT),
+        ));
+        assert_eq!(explicit.len(), 2);
+        assert!(explicit.iter().all(|color| *color == theme::TEXT_ON_ACCENT));
+    }
 
     #[test]
     fn accent_foreground_has_accessible_contrast() {
