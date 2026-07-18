@@ -4,8 +4,8 @@
 1 RT_MANIFEST "app.manifest"
 
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION 1,0,3,0
+PRODUCTVERSION 1,0,3,0
 FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
 FILEFLAGS 0
 FILEOS VOS_NT_WINDOWS32
@@ -17,11 +17,11 @@ BEGIN
     BLOCK "040904B0"
     BEGIN
       VALUE "FileDescription", "DLSS Updater\0"
-      VALUE "FileVersion", "0.1.0\0"
-      VALUE "InternalName", "dlss-updater.exe\0"
-      VALUE "OriginalFilename", "dlss-updater.exe\0"
+      VALUE "FileVersion", "1.0.3\0"
+      VALUE "InternalName", "DLSS Updater.exe\0"
+      VALUE "OriginalFilename", "DLSS Updater.exe\0"
       VALUE "ProductName", "DLSS Updater\0"
-      VALUE "ProductVersion", "0.1.0\0"
+      VALUE "ProductVersion", "1.0.3\0"
     END
   END
   BLOCK "VarFileInfo"
