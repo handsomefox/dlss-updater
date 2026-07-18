@@ -40,9 +40,12 @@ fn main() -> eframe::Result {
     )
 }
 
-#[expect(
-    clippy::exit,
-    reason = "the privileged helper must report malformed or rejected plans through its process status"
+#[cfg_attr(
+    windows,
+    expect(
+        clippy::exit,
+        reason = "the privileged helper must report malformed or rejected plans through its process status"
+    )
 )]
 fn elevated_helper() {
     #[cfg(windows)]
