@@ -6,7 +6,7 @@ mod ui;
 mod worker;
 
 #[cfg(windows)]
-use dlss_core::{KnownDirectories, SystemToolProvider};
+use dlss_core::SystemToolProvider;
 use dlss_core::{PlatformCapabilities, SystemToolState};
 use eframe::egui;
 use state::PersistedState;
@@ -110,6 +110,8 @@ struct DlssApp {
     release_progress: Option<(dlss_core::ReleaseId, u64, Option<u64>)>,
     imports: Vec<dlss_core::ImportedDllRecord>,
     backups: Vec<dlss_core::BackupRecord>,
+    backup_warning: Option<String>,
+    backups_loading: bool,
     inspecting_release: Option<dlss_core::ReleaseId>,
     upgrading: Option<dlss_core::GameId>,
     toast: Option<String>,
@@ -273,26 +275,6 @@ impl DlssApp {
         let capabilities = dlss_platform::windows::capabilities();
         #[cfg(not(windows))]
         let capabilities = PlatformCapabilities::default();
-        #[cfg(windows)]
-        let backup_result = dlss_platform::windows::WindowsKnownDirectories
-            .local_app_data()
-            .and_then(|base| {
-                dlss_core::BackupStore::new(base.join("DLSS Updater/backups")).load_trusted_index(
-                    &dlss_platform::windows::WindowsDllInspector,
-                    &dlss_platform::windows::WindowsTrustVerifier,
-                )
-            })
-            .map(|index| index.records);
-        #[cfg(windows)]
-        let (backups, backup_warning) = match backup_result {
-            Ok(backups) => (backups, None),
-            Err(error) => (
-                Vec::new(),
-                Some(format!("Could not load backup history: {error}")),
-            ),
-        };
-        #[cfg(not(windows))]
-        let (backups, backup_warning) = (Vec::new(), None);
         let worker = Worker::start(persisted.custom_roots.clone(), cc.egui_ctx.clone());
         let app = Self {
             persisted,
@@ -318,14 +300,16 @@ impl DlssApp {
                 catalog_loading: true,
                 worker_connected: true,
             },
-            last_error: backup_warning,
+            last_error: None,
             catalog_release: None,
             catalog_error: None,
             releases: Vec::new(),
             release_errors: std::collections::HashMap::new(),
             release_progress: None,
             imports: Vec::new(),
-            backups,
+            backups: Vec::new(),
+            backup_warning: None,
+            backups_loading: true,
             inspecting_release: None,
             upgrading: None,
             toast: None,
@@ -338,6 +322,7 @@ impl DlssApp {
             tool_runtime: WindowsToolRuntime::default(),
         };
         let _ = app.worker.commands.send(Command::Scan);
+        let _ = app.worker.commands.send(Command::RefreshBackups);
         let _ = app.worker.commands.send(Command::RefreshCatalog);
         app
     }
@@ -372,6 +357,8 @@ impl DlssApp {
             }
             Event::ScanStarted => self.handle_scan_started(),
             Event::ScanFinished(result) => self.handle_scan_finished(result),
+            Event::BackupsStarted => self.backups_loading = true,
+            Event::BackupsFinished(result) => self.handle_backups_finished(result),
             Event::CatalogStarted => {
                 self.runtime.catalog_loading = true;
                 self.catalog_error = None;
@@ -411,6 +398,23 @@ impl DlssApp {
         self.runtime.scanning = true;
         self.undo_game = None;
         self.last_error = None;
+    }
+
+    fn handle_backups_finished(
+        &mut self,
+        result: Result<dlss_core::BackupLoadReport, worker::WorkerError>,
+    ) {
+        self.backups_loading = false;
+        match result {
+            Ok(report) => {
+                self.backup_warning = backup_warning_message(&report);
+                self.backups = report.usable;
+            }
+            Err(error) => {
+                self.backups.clear();
+                self.backup_warning = Some(format!("Could not load backup history: {error}"));
+            }
+        }
     }
 
     fn handle_scan_finished(
@@ -1082,23 +1086,11 @@ impl DlssApp {
     }
 
     fn refresh_backups(&mut self) {
-        #[cfg(windows)]
-        match dlss_platform::windows::WindowsKnownDirectories
-            .local_app_data()
-            .and_then(|base| {
-                dlss_core::BackupStore::new(base.join("DLSS Updater/backups")).load_trusted_index(
-                    &dlss_platform::windows::WindowsDllInspector,
-                    &dlss_platform::windows::WindowsTrustVerifier,
-                )
-            }) {
-            Ok(index) => self.backups = index.records,
-            Err(error) => {
-                tracing::warn!(%error, "could not refresh backup history");
-                self.last_error = Some(format!("Could not refresh backup history: {error}"));
-            }
+        self.backups_loading = true;
+        if self.worker.commands.send(Command::RefreshBackups).is_err() {
+            self.backups_loading = false;
+            self.backup_warning = Some("Background worker stopped unexpectedly".into());
         }
-        #[cfg(not(windows))]
-        self.backups.clear();
     }
 
     fn profile_for_game(&self, game_id: &dlss_core::GameId) -> dlss_core::TargetProfile {
@@ -1360,6 +1352,42 @@ fn release_state_label(release: &dlss_core::CachedRelease) -> String {
     }
 }
 
+fn backup_warning_message(report: &dlss_core::BackupLoadReport) -> Option<String> {
+    let mut warnings = Vec::new();
+    if !report.rejected.is_empty() {
+        let details = report
+            .rejected
+            .iter()
+            .take(3)
+            .map(|rejected| {
+                format!(
+                    "{}: {}",
+                    rejected.record.original_path.display(),
+                    rejected.reason
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        warnings.push(format!(
+            "{} backup{} hidden because verification failed ({details})",
+            report.rejected.len(),
+            if report.rejected.len() == 1 { "" } else { "s" }
+        ));
+    }
+    if report.offline_revocation_fallbacks > 0 {
+        warnings.push(format!(
+            "{} NVIDIA-signed backup{} available with offline revocation validation; retry when online to complete the check",
+            report.offline_revocation_fallbacks,
+            if report.offline_revocation_fallbacks == 1 {
+                " is"
+            } else {
+                "s are"
+            }
+        ));
+    }
+    (!warnings.is_empty()).then(|| warnings.join(". "))
+}
+
 impl eframe::App for DlssApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.receive_worker_events(ctx);
@@ -1383,6 +1411,26 @@ impl eframe::App for DlssApp {
         });
         self.bottom_bar(root);
         egui::CentralPanel::default().show(root, |ui| {
+            if let Some(warning) = self.backup_warning.clone() {
+                widgets::banner(ui, theme::WARNING, icons::WARNING, &warning, false);
+                if ui
+                    .add_enabled(
+                        !self.backups_loading,
+                        egui::Button::new(widgets::icon_text(
+                            icons::ARROW_CLOCKWISE,
+                            if self.backups_loading {
+                                "Checking…"
+                            } else {
+                                "Retry"
+                            },
+                        )),
+                    )
+                    .clicked()
+                {
+                    self.refresh_backups();
+                }
+                ui.add_space(6.0);
+            }
             if let Some(error) = self.last_error.clone()
                 && widgets::banner(ui, theme::DANGER, icons::WARNING_CIRCLE, &error, true)
             {
@@ -1579,5 +1627,15 @@ mod tests {
         assert!(!PersistedState::default().disclaimer_acknowledged);
         let old_state: PersistedState = serde_json::from_str("{}").unwrap();
         assert!(!old_state.disclaimer_acknowledged);
+    }
+
+    #[test]
+    fn backup_warning_clears_after_clean_retry_report() {
+        let warning = backup_warning_message(&dlss_core::BackupLoadReport {
+            offline_revocation_fallbacks: 1,
+            ..Default::default()
+        });
+        assert!(warning.is_some());
+        assert!(backup_warning_message(&dlss_core::BackupLoadReport::default()).is_none());
     }
 }

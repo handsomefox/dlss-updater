@@ -31,6 +31,7 @@ type WorkerResult<T> = Result<T, WorkerError>;
 
 pub(crate) enum Command {
     Scan,
+    RefreshBackups,
     RefreshCatalog,
     InspectRelease(ReleaseId),
     RemoveRelease(ReleaseId),
@@ -74,6 +75,8 @@ pub(crate) enum Event {
     Warning(String),
     ScanStarted,
     ScanFinished(WorkerResult<dlss_core::DiscoveryOutcome>),
+    BackupsStarted,
+    BackupsFinished(WorkerResult<dlss_core::BackupLoadReport>),
     CatalogStarted,
     CatalogFinished(WorkerResult<CatalogSnapshot>),
     ReleaseFinished(WorkerResult<dlss_core::CachedRelease>),
@@ -187,6 +190,7 @@ fn run(commands: &Receiver<Command>, events: &EventSink, mut roots: Vec<PathBuf>
 fn command_name(command: &Command) -> &'static str {
     match command {
         Command::Scan => "scan",
+        Command::RefreshBackups => "refresh_backups",
         Command::RefreshCatalog => "refresh_catalog",
         Command::InspectRelease(_) => "inspect_release",
         Command::RemoveRelease(_) => "remove_release",
@@ -204,6 +208,7 @@ fn command_name(command: &Command) -> &'static str {
 fn dispatch(command: Command, events: &EventSink, state: &mut WorkerState) -> bool {
     match command {
         Command::Scan => scan(events, &state.roots, &mut state.games),
+        Command::RefreshBackups => refresh_backups(events),
         Command::RefreshCatalog => refresh_catalog(
             events,
             &mut state.assets,
@@ -564,6 +569,31 @@ fn scan(events: &EventSink, roots: &[PathBuf], games: &mut Vec<GameInstall>) {
     events.send(Event::ScanFinished(Ok(outcome)));
 }
 
+fn refresh_backups(events: &EventSink) {
+    events.send(Event::BackupsStarted);
+    events.send(Event::BackupsFinished(load_backups()));
+}
+
+#[cfg(windows)]
+fn load_backups() -> WorkerResult<dlss_core::BackupLoadReport> {
+    let base = dlss_platform::windows::WindowsKnownDirectories.local_app_data()?;
+    Ok(
+        dlss_core::BackupStore::new(base.join("DLSS Updater/backups")).load_trusted_report(
+            &dlss_platform::windows::WindowsDllInspector,
+            &dlss_platform::windows::WindowsTrustVerifier,
+        )?,
+    )
+}
+
+#[cfg(not(windows))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "keeps the platform-specific backup loaders behind one event result type"
+)]
+fn load_backups() -> WorkerResult<dlss_core::BackupLoadReport> {
+    Ok(dlss_core::BackupLoadReport::default())
+}
+
 fn refresh_catalog(
     events: &EventSink,
     assets: &mut Vec<OfficialAsset>,
@@ -779,16 +809,21 @@ fn apply_profile(
     progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<UpgradeReport> {
     let (base, catalog_dlls) = prepare_release(asset, progress)?;
-    let backup_index = dlss_core::BackupStore::new(base.join("backups")).load_trusted_index(
-        &dlss_platform::windows::WindowsDllInspector,
-        &dlss_platform::windows::WindowsTrustVerifier,
-    )?;
+    let backup_report = dlss_core::BackupStore::new(base.join("backups"))
+        .load_trusted_report(
+            &dlss_platform::windows::WindowsDllInspector,
+            &dlss_platform::windows::WindowsTrustVerifier,
+        )
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "backup history is unavailable while planning profile");
+            dlss_core::BackupLoadReport::default()
+        });
     let plan = dlss_core::plan_target_profile(
         operation_nonce(),
         &game.dlls,
         &catalog_dlls.dlls,
         cached,
-        &backup_index.records,
+        &backup_report.usable,
         profile,
     )?;
     Ok(execute_game_plan(game, asset, &base, &plan))

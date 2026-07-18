@@ -391,6 +391,19 @@ pub struct BackupIndex {
     pub records: Vec<BackupRecord>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RejectedBackup {
+    pub record: BackupRecord,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BackupLoadReport {
+    pub usable: Vec<BackupRecord>,
+    pub rejected: Vec<RejectedBackup>,
+    pub offline_revocation_fallbacks: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ElevatedFilePlan {
     pub game_id: GameId,

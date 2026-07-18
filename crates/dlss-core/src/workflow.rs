@@ -1,7 +1,8 @@
 use crate::{
-    AtomicFileReplacer, BackupIndex, BackupRecord, BatchResult, CatalogDll, Comparison, CoreError,
-    DesiredDll, DllInspector, DllInstallation, OperationPlan, PlannedSwap, SignatureStatus,
-    SwapResult, TargetProfile, TrustPolicy, TrustVerifier, compare_target, is_nvidia_signer,
+    AtomicFileReplacer, BackupIndex, BackupLoadReport, BackupRecord, BatchResult, CatalogDll,
+    Comparison, CoreError, DesiredDll, DllInspector, DllInstallation, OperationPlan, PlannedSwap,
+    RejectedBackup, RevocationStatus, SignatureStatus, SwapResult, TargetProfile, TrustPolicy,
+    TrustVerifier, compare_target, is_nvidia_signer,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -241,7 +242,9 @@ impl BackupStore {
             version: metadata.version,
             created_unix,
         };
-        let mut index = self.load_validated_index(inspector)?;
+        let mut index = BackupIndex {
+            records: self.load_validated_report(inspector)?.usable,
+        };
         if let Some(existing) = index.records.iter_mut().find(|existing| {
             existing.sha256 == record.sha256 && existing.original_path == record.original_path
         }) {
@@ -275,49 +278,98 @@ impl BackupStore {
         &self,
         inspector: &dyn DllInspector,
     ) -> Result<BackupIndex, CoreError> {
-        let index = self.load_index()?;
-        for record in &index.records {
-            let expected_path = self.root.join("objects").join(hex_hash(record.sha256));
-            if record.content_path != expected_path
-                || !expected_path.is_file()
-                || hash_file(&expected_path)? != record.sha256
-            {
-                return Err(CoreError::Validation(
-                    "backup index object path or hash is invalid".into(),
-                ));
-            }
-            let metadata = inspector.inspect(&expected_path)?;
-            if metadata.sha256 != record.sha256 || metadata.version != record.version {
-                return Err(CoreError::Validation(
-                    "backup index object metadata is invalid".into(),
-                ));
-            }
-        }
-        Ok(index)
+        Ok(BackupIndex {
+            records: self.load_validated_report(inspector)?.usable,
+        })
     }
 
-    /// Loads the backup index and requires every reusable object to retain a
-    /// valid NVIDIA signature in addition to its content and PE metadata.
+    /// Loads and independently validates every backup object.
+    ///
+    /// A damaged entry is reported and omitted without hiding unrelated
+    /// backups. Only an unreadable index prevents a report from being built.
     ///
     /// # Errors
-    /// Returns an error when structural validation or platform trust fails.
-    pub fn load_trusted_index(
+    /// Returns an error when the index itself cannot be read or decoded.
+    pub fn load_validated_report(
+        &self,
+        inspector: &dyn DllInspector,
+    ) -> Result<BackupLoadReport, CoreError> {
+        let mut report = BackupLoadReport::default();
+        for record in self.load_index()?.records {
+            match self.validate_record(&record, inspector) {
+                Ok(()) => report.usable.push(record),
+                Err(error) => report.rejected.push(RejectedBackup {
+                    record,
+                    reason: error.to_string(),
+                }),
+            }
+        }
+        Ok(report)
+    }
+
+    /// Loads usable backups that retain a valid NVIDIA signature in addition
+    /// to their content and PE metadata, reporting rejected entries separately.
+    ///
+    /// # Errors
+    /// Returns an error only when the index itself cannot be read or decoded.
+    pub fn load_trusted_report(
         &self,
         inspector: &dyn DllInspector,
         verifier: &dyn TrustVerifier,
-    ) -> Result<BackupIndex, CoreError> {
-        let index = self.load_validated_index(inspector)?;
-        for record in &index.records {
-            let trust = verifier.verify(&record.content_path, TrustPolicy::Strict)?;
-            if trust.signature != SignatureStatus::Trusted
-                || !trust.signer.as_deref().is_some_and(is_nvidia_signer)
-            {
-                return Err(CoreError::Validation(
-                    "backup index object failed NVIDIA trust validation".into(),
-                ));
+    ) -> Result<BackupLoadReport, CoreError> {
+        let structurally_valid = self.load_validated_report(inspector)?;
+        let mut report = BackupLoadReport {
+            rejected: structurally_valid.rejected,
+            ..BackupLoadReport::default()
+        };
+        for record in structurally_valid.usable {
+            match verifier.verify(&record.content_path, TrustPolicy::OfficialNvidiaCatalog) {
+                Ok(trust)
+                    if trust.signature == SignatureStatus::Trusted
+                        && trust.signer.as_deref().is_some_and(is_nvidia_signer) =>
+                {
+                    if trust.revocation == RevocationStatus::UnavailableFallback {
+                        report.offline_revocation_fallbacks += 1;
+                    }
+                    report.usable.push(record);
+                }
+                Ok(_) => report.rejected.push(RejectedBackup {
+                    record,
+                    reason: "backup object failed NVIDIA trust validation".into(),
+                }),
+                Err(error) => report.rejected.push(RejectedBackup {
+                    record,
+                    reason: error.to_string(),
+                }),
             }
         }
-        Ok(index)
+        Ok(report)
+    }
+
+    fn validate_record(
+        &self,
+        record: &BackupRecord,
+        inspector: &dyn DllInspector,
+    ) -> Result<(), CoreError> {
+        let expected_path = self.root.join("objects").join(hex_hash(record.sha256));
+        if record.content_path != expected_path
+            || !expected_path.is_file()
+            || hash_file(&expected_path)? != record.sha256
+        {
+            return Err(CoreError::Validation(
+                "backup index object path or hash is invalid".into(),
+            ));
+        }
+        let metadata = inspector.inspect(&expected_path)?;
+        if metadata.sha256 != record.sha256
+            || metadata.version != record.version
+            || !metadata.x86_64
+        {
+            return Err(CoreError::Validation(
+                "backup index object metadata is invalid".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -537,6 +589,27 @@ mod tests {
                 signature: SignatureStatus::Trusted,
                 signer: Some(self.0.into()),
                 revocation: RevocationStatus::Verified,
+                native_failure: None,
+            })
+        }
+    }
+
+    struct TrustByContents;
+    impl TrustVerifier for TrustByContents {
+        fn verify(&self, path: &Path, policy: TrustPolicy) -> Result<TrustReport, CoreError> {
+            assert_eq!(policy, TrustPolicy::OfficialNvidiaCatalog);
+            let bytes = fs::read(path)?;
+            let (signer, revocation) = if bytes == b"wrong publisher" {
+                ("Example Publisher", RevocationStatus::Verified)
+            } else if bytes == b"offline valid" {
+                ("NVIDIA Corporation", RevocationStatus::UnavailableFallback)
+            } else {
+                ("NVIDIA Corporation", RevocationStatus::Verified)
+            };
+            Ok(TrustReport {
+                signature: SignatureStatus::Trusted,
+                signer: Some(signer.into()),
+                revocation,
                 native_failure: None,
             })
         }
@@ -927,16 +1000,79 @@ mod tests {
             .commit(&original, hash_file(&original).unwrap(), &BytesInspector, 1)
             .unwrap();
 
-        assert!(
+        let trusted = backups
+            .load_trusted_report(&BytesInspector, &Signer("NVIDIA Corporation"))
+            .unwrap();
+        assert_eq!(trusted.usable.len(), 1);
+        assert!(trusted.rejected.is_empty());
+
+        let untrusted = backups
+            .load_trusted_report(&BytesInspector, &Signer("Example Publisher"))
+            .unwrap();
+        assert!(untrusted.usable.is_empty());
+        assert_eq!(untrusted.rejected.len(), 1);
+    }
+
+    #[test]
+    fn backup_report_keeps_valid_and_offline_nvidia_records() {
+        let dir = tempdir().unwrap();
+        let backups = BackupStore::new(dir.path().join("backups"));
+        for (name, bytes) in [
+            ("valid.dll", b"valid".as_slice()),
+            ("corrupt.dll", b"will be corrupt".as_slice()),
+            ("wrong.dll", b"wrong publisher".as_slice()),
+            ("offline.dll", b"offline valid".as_slice()),
+        ] {
+            let original = dir.path().join(name);
+            fs::write(&original, bytes).unwrap();
             backups
-                .load_trusted_index(&BytesInspector, &Signer("NVIDIA Corporation"))
-                .is_ok()
+                .commit(&original, hash_file(&original).unwrap(), &BytesInspector, 1)
+                .unwrap();
+        }
+        let corrupt = backups
+            .load_index()
+            .unwrap()
+            .records
+            .into_iter()
+            .find(|record| record.original_path.ends_with("corrupt.dll"))
+            .unwrap();
+        fs::write(corrupt.content_path, b"tampered").unwrap();
+
+        let report = backups
+            .load_trusted_report(&BytesInspector, &TrustByContents)
+            .unwrap();
+        let usable_names = report
+            .usable
+            .iter()
+            .filter_map(|record| record.original_path.file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            usable_names,
+            [OsStr::new("valid.dll"), OsStr::new("offline.dll")]
         );
-        assert!(
-            backups
-                .load_trusted_index(&BytesInspector, &Signer("Example Publisher"))
-                .is_err()
-        );
+        assert_eq!(report.rejected.len(), 2);
+        assert_eq!(report.offline_revocation_fallbacks, 1);
+    }
+
+    #[test]
+    fn corrupt_history_does_not_block_a_new_backup_commit() {
+        let dir = tempdir().unwrap();
+        let backups = BackupStore::new(dir.path().join("backups"));
+        let old = dir.path().join("old.dll");
+        fs::write(&old, b"old").unwrap();
+        let old_record = backups
+            .commit(&old, hash_file(&old).unwrap(), &BytesInspector, 1)
+            .unwrap();
+        fs::write(&old_record.content_path, b"corrupt").unwrap();
+
+        let current = dir.path().join("current.dll");
+        fs::write(&current, b"current").unwrap();
+        backups
+            .commit(&current, hash_file(&current).unwrap(), &BytesInspector, 2)
+            .unwrap();
+        let index = backups.load_index().unwrap();
+        assert_eq!(index.records.len(), 1);
+        assert!(index.records[0].original_path.ends_with("current.dll"));
     }
 
     #[test]

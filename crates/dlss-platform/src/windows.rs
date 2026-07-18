@@ -1055,10 +1055,6 @@ impl Drop for StagedFilePlan {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "the elevated boundary keeps all plan validation visible in one audit path"
-)]
 fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFilePlan, CoreError> {
     let game_root = plan.game_root.canonicalize()?;
     let discovered_game = WindowsGameLocator
@@ -1135,11 +1131,7 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
                 "source is outside the validated cache".into(),
             ));
         }
-        let policy = if release_source {
-            TrustPolicy::OfficialNvidiaCatalog
-        } else {
-            TrustPolicy::Strict
-        };
+        let policy = staged_source_policy(release_source, backup_source);
         validate_nvidia_dll(&source, policy)?;
         let staged = stage_elevated_source(
             &source,
@@ -1162,6 +1154,14 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
         },
         sources: staged_sources,
     })
+}
+
+fn staged_source_policy(release_source: bool, backup_source: bool) -> TrustPolicy {
+    if release_source || backup_source {
+        TrustPolicy::OfficialNvidiaCatalog
+    } else {
+        TrustPolicy::Strict
+    }
 }
 
 fn validate_nvidia_dll(path: &Path, policy: TrustPolicy) -> Result<(), CoreError> {
@@ -1287,6 +1287,15 @@ mod tests {
             assert_eq!(report.revocation, RevocationStatus::NotVerified);
             assert_eq!(report.native_failure.unwrap().status, status);
         }
+    }
+
+    #[test]
+    fn elevated_backups_use_offline_nvidia_fallback_but_imports_stay_strict() {
+        assert_eq!(
+            staged_source_policy(false, true),
+            TrustPolicy::OfficialNvidiaCatalog
+        );
+        assert_eq!(staged_source_policy(false, false), TrustPolicy::Strict);
     }
 
     #[test]
