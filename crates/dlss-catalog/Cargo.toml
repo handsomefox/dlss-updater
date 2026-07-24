@@ -13,7 +13,7 @@ jiff.workspace = true
 reqwest = { version = "=0.13.4", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
 # reqwest's `rustls-no-provider` feature deliberately selects no crypto backend;
 # this direct dependency exposes ring, which `GithubCatalogClient` installs once.
-rustls = { version = "=0.23.41", default-features = false, features = ["ring", "std"] }
+rustls = { version = "=0.23.42", default-features = false, features = ["ring", "std"] }
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 thiserror.workspace = true
