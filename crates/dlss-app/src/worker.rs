@@ -148,6 +148,16 @@ struct WorkerState {
     assets: Vec<OfficialAsset>,
     undo_plans: HashMap<GameId, dlss_core::OperationPlan>,
     imports: dlss_core::ImportIndex,
+    /// Releases already downloaded, extracted, and fully validated during this
+    /// session, so applying to several games in a row does not re-hash and
+    /// re-verify the same 15 official DLLs each time.
+    ///
+    /// This is a cache of *validation work*, not of trust: every planned swap
+    /// still carries the hash recorded here, and both `execute_swap` and the
+    /// atomic replacer re-hash the source file before it can overwrite
+    /// anything, so a cache entry can never install unexpected bytes.
+    #[cfg(windows)]
+    prepared: HashMap<ReleaseId, dlss_catalog::ValidatedRelease>,
 }
 
 fn run(commands: &Receiver<Command>, events: &EventSink, mut roots: Vec<PathBuf>) {
@@ -175,6 +185,8 @@ fn run(commands: &Receiver<Command>, events: &EventSink, mut roots: Vec<PathBuf>
         catalog,
         undo_plans: HashMap::new(),
         imports,
+        #[cfg(windows)]
+        prepared: HashMap::new(),
     };
     events.send(Event::ImportsLoaded(state.imports.records.clone()));
     while let Ok(command) = commands.recv() {
@@ -234,21 +246,30 @@ fn dispatch(command: Command, events: &EventSink, state: &mut WorkerState) -> bo
 fn inspect_release_command(id: ReleaseId, events: &EventSink, state: &mut WorkerState) {
     let progress_events = events.clone();
     let progress_id = id.clone();
-    let result = state
+    let asset = state
         .assets
         .iter()
         .find(|asset| asset.release.id == id)
-        .ok_or_else(|| WorkerError::State("release is no longer in the official index".into()))
-        .and_then(|asset| {
-            inspect_release(asset, |release_state, received, total| {
+        .cloned()
+        .ok_or_else(|| WorkerError::State("release is no longer in the official index".into()));
+    // An explicit "download and inspect" is the user asking for the release to
+    // be validated now, so it always does the full work and refreshes the
+    // session cache rather than answering from it.
+    let result = asset.and_then(|asset| {
+        inspect_release(
+            &asset,
+            state,
+            Revalidate::Always,
+            |release_state, received, total| {
                 progress_events.send(Event::ReleaseProgress {
                     id: progress_id.clone(),
                     state: release_state,
                     received,
                     total,
                 });
-            })
-        });
+            },
+        )
+    });
     if result.is_err() {
         if let Err(error) = &result {
             tracing::warn!(release = %id.0, %error, "release inspection failed");
@@ -274,6 +295,8 @@ fn inspect_release_command(id: ReleaseId, events: &EventSink, state: &mut Worker
 }
 
 fn remove_release_command(id: ReleaseId, events: &EventSink, state: &mut WorkerState) {
+    #[cfg(windows)]
+    state.prepared.remove(&id);
     let result = remove_release_files(&id).and_then(|()| {
         state.catalog.remove_release(&id);
         if let Some(path) = &state.catalog_path {
@@ -353,14 +376,19 @@ fn profile_command(
                     ))
                 });
             match asset.and_then(|asset| {
-                inspect_release(&asset, |release_state, received, total| {
-                    progress_events.send(Event::ReleaseProgress {
-                        id: release_id.clone(),
-                        state: release_state,
-                        received,
-                        total,
-                    });
-                })
+                inspect_release(
+                    &asset,
+                    state,
+                    Revalidate::ReuseSession,
+                    |release_state, received, total| {
+                        progress_events.send(Event::ReleaseProgress {
+                            id: release_id.clone(),
+                            state: release_state,
+                            received,
+                            total,
+                        });
+                    },
+                )
             }) {
                 Ok(release) => {
                     cached.extend(release.dlls.iter().cloned());
@@ -373,25 +401,27 @@ fn profile_command(
             }
         }
     }
-    let result = latest_asset(&state.assets)
-        .ok_or_else(|| WorkerError::State("official release metadata is not available".into()))
-        .and_then(|asset| {
-            let release_id = asset.release.id.clone();
-            apply_profile(
-                &game,
-                asset,
-                &cached,
-                profile,
-                |release_state, received, total| {
-                    progress_events.send(Event::ReleaseProgress {
-                        id: release_id.clone(),
-                        state: release_state,
-                        received,
-                        total,
-                    });
-                },
-            )
-        });
+    let asset = latest_asset(&state.assets)
+        .cloned()
+        .ok_or_else(|| WorkerError::State("official release metadata is not available".into()));
+    let result = asset.and_then(|asset| {
+        let release_id = asset.release.id.clone();
+        apply_profile(
+            &game,
+            &asset,
+            &cached,
+            profile,
+            state,
+            |release_state, received, total| {
+                progress_events.send(Event::ReleaseProgress {
+                    id: release_id.clone(),
+                    state: release_state,
+                    received,
+                    total,
+                });
+            },
+        )
+    });
     finish_game_operation(id, game, result, events, state);
 }
 
@@ -776,12 +806,29 @@ fn catalog_index_path() -> Option<PathBuf> {
     None
 }
 
+/// Whether a release must be validated again or may reuse this session's
+/// already-validated result.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Revalidate {
+    Always,
+    #[cfg_attr(
+        not(windows),
+        expect(
+            dead_code,
+            reason = "only the Windows release-preparation path reuses a validated release"
+        )
+    )]
+    ReuseSession,
+}
+
 #[cfg(windows)]
 fn inspect_release(
     asset: &OfficialAsset,
+    state: &mut WorkerState,
+    revalidate: Revalidate,
     progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<dlss_core::CachedRelease> {
-    let (_, validated) = prepare_release(asset, progress)?;
+    let (_, validated) = prepare_release(asset, state, revalidate, progress)?;
     Ok(dlss_core::CachedRelease {
         metadata: asset.release.clone(),
         state: dlss_core::ReleaseState::Ready,
@@ -793,6 +840,8 @@ fn inspect_release(
 #[cfg(not(windows))]
 fn inspect_release(
     _asset: &OfficialAsset,
+    _state: &mut WorkerState,
+    _revalidate: Revalidate,
     _progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<dlss_core::CachedRelease> {
     Err(WorkerError::Unavailable(
@@ -806,9 +855,10 @@ fn apply_profile(
     asset: &OfficialAsset,
     cached: &[dlss_core::CatalogDll],
     profile: &TargetProfile,
+    state: &mut WorkerState,
     progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<UpgradeReport> {
-    let (base, catalog_dlls) = prepare_release(asset, progress)?;
+    let (base, catalog_dlls) = prepare_release(asset, state, Revalidate::ReuseSession, progress)?;
     let backup_report = dlss_core::BackupStore::new(base.join("backups"))
         .load_trusted_report(
             &dlss_platform::windows::WindowsDllInspector,
@@ -832,11 +882,36 @@ fn apply_profile(
 #[cfg(windows)]
 fn prepare_release(
     asset: &OfficialAsset,
-    mut progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
+    state: &mut WorkerState,
+    revalidate: Revalidate,
+    progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<(PathBuf, dlss_catalog::ValidatedRelease)> {
+    let base = dlss_platform::windows::WindowsKnownDirectories
+        .local_app_data()?
+        .join("DLSS Updater");
+    if revalidate == Revalidate::ReuseSession
+        && let Some(prepared) = state.prepared.get(&asset.release.id)
+    {
+        tracing::info!(release = %asset.release.tag, dlls = prepared.dlls.len(), "reusing this session's validated release");
+        return Ok((base, prepared.clone()));
+    }
+    let validated = validate_release_cache(asset, &base, progress)?;
+    state
+        .prepared
+        .insert(asset.release.id.clone(), validated.clone());
+    Ok((base, validated))
+}
+
+/// Downloads if needed, extracts, and fully validates a release into the
+/// on-disk prepared cache. Always does the real work; the session memo lives
+/// in [`prepare_release`].
+#[cfg(windows)]
+fn validate_release_cache(
+    asset: &OfficialAsset,
+    base: &std::path::Path,
+    mut progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
+) -> WorkerResult<dlss_catalog::ValidatedRelease> {
     let component = safe_component(&asset.release.id.0)?;
-    let directories = dlss_platform::windows::WindowsKnownDirectories;
-    let base = directories.local_app_data()?.join("DLSS Updater");
     let archive = base.join("cache/archives").join(format!("{component}.zip"));
     let extracted = base.join("cache/releases").join(component);
     tracing::info!(release = %asset.release.tag, archive = %archive.display(), "preparing release");
@@ -846,7 +921,7 @@ fn prepare_release(
         dlss_catalog::load_prepared_release(&extracted, &asset.release.id, &inspector, &verifier)?
     {
         tracing::info!(release = %asset.release.tag, prepared = %extracted.display(), dlls = prepared.dlls.len(), "prepared release cache hit");
-        return Ok((base, prepared));
+        return Ok(prepared);
     }
     tracing::info!(release = %asset.release.tag, prepared = %extracted.display(), "prepared release cache miss");
     let client = GithubCatalogClient::new()?;
@@ -892,7 +967,7 @@ fn prepare_release(
         Ok(catalog_dlls) => {
             std::fs::remove_file(&archive)?;
             tracing::info!(release = %asset.release.tag, dlls = catalog_dlls.dlls.len(), "prepared release committed and archive removed");
-            Ok((base, catalog_dlls))
+            Ok(catalog_dlls)
         }
         // A cached archive that was never digest-verified may be corrupt or
         // truncated and would fail forever. Discard it and re-download once.
@@ -927,7 +1002,7 @@ fn prepare_release(
             let catalog_dlls = extract(&archive)?;
             std::fs::remove_file(&archive)?;
             tracing::info!(release = %asset.release.tag, dlls = catalog_dlls.dlls.len(), "prepared release committed and archive removed");
-            Ok((base, catalog_dlls))
+            Ok(catalog_dlls)
         }
         Err(error) => Err(error.into()),
     }
@@ -1167,6 +1242,7 @@ fn apply_profile(
     _asset: &OfficialAsset,
     _cached: &[dlss_core::CatalogDll],
     _profile: &TargetProfile,
+    _state: &mut WorkerState,
     _progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<UpgradeReport> {
     Err(WorkerError::Unavailable(
