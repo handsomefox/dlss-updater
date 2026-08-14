@@ -676,60 +676,99 @@ impl DlssApp {
 
     fn tools_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::Tools);
-        egui::Window::new("Global Tools").open(&mut open).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).default_width(520.0).show(ctx, |ui| {
-            widgets::banner(ui, theme::WARNING, icons::WARNING, "Global setting — affects all compatible games on this PC", false);
-            ui.add_space(8.0); ui.heading("DLSS on-screen indicator");
-            ui.separator(); ui.label(format!("Current state: {}", state_label(&self.tool_state)));
-            if !self.capabilities.system_tools { ui.weak("Unavailable: Windows NVIDIA registry controls are not supported on this platform."); }
-            ui.add_enabled_ui(self.capabilities.system_tools, |ui| {
-                ui.radio_value(&mut self.staged_tool_state, SystemToolState::Off, "Off");
-                ui.radio_value(&mut self.staged_tool_state, SystemToolState::DlssIndicatorDebug, "Debug DLLs");
-                ui.radio_value(&mut self.staged_tool_state, SystemToolState::DlssIndicatorProduction, "Production and debug DLLs");
+        widgets::modal(
+            ctx,
+            "tools",
+            icons::WRENCH,
+            "Global tools",
+            520.0,
+            &mut open,
+            |ui| {
+                widgets::banner(
+                    ui,
+                    theme::WARNING,
+                    icons::WARNING,
+                    "Global setting — affects all compatible games on this PC",
+                    false,
+                );
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    if ui.button("Apply").clicked() {
-                        self.change_indicator(false);
-                    }
-                    #[cfg(windows)]
-                    let can_restore = !self.persisted.tool_restore_points.is_empty();
-                    #[cfg(not(windows))]
-                    let can_restore = false;
-                    if ui.add_enabled(can_restore, egui::Button::new("Restore Previous")).clicked() {
-                        self.change_indicator(true);
-                    }
-                    if ui.button(widgets::icon_text(icons::INFO, "About this setting")).clicked() {
-                        self.open_windows.insert(AppWindow::ToolInfo);
+                ui.strong("DLSS on-screen indicator");
+                ui.label(format!("Current state: {}", state_label(&self.tool_state)));
+                ui.add_space(4.0);
+                if !self.capabilities.system_tools {
+                    ui.weak("Unavailable: Windows NVIDIA registry controls are not supported on this platform.");
+                }
+                ui.add_enabled_ui(self.capabilities.system_tools, |ui| {
+                    ui.radio_value(&mut self.staged_tool_state, SystemToolState::Off, "Off");
+                    ui.radio_value(
+                        &mut self.staged_tool_state,
+                        SystemToolState::DlssIndicatorDebug,
+                        "Debug DLLs",
+                    );
+                    ui.radio_value(
+                        &mut self.staged_tool_state,
+                        SystemToolState::DlssIndicatorProduction,
+                        "Production and debug DLLs",
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Apply").clicked() {
+                            self.change_indicator(false);
+                        }
+                        #[cfg(windows)]
+                        let can_restore = !self.persisted.tool_restore_points.is_empty();
+                        #[cfg(not(windows))]
+                        let can_restore = false;
+                        if ui
+                            .add_enabled(can_restore, egui::Button::new("Restore Previous"))
+                            .clicked()
+                        {
+                            self.change_indicator(true);
+                        }
+                        if ui
+                            .button(widgets::icon_text(icons::INFO, "About this setting"))
+                            .clicked()
+                        {
+                            self.open_windows.insert(AppWindow::ToolInfo);
+                        }
+                    });
+                    if let Some(error) = &self.last_error {
+                        selectable_error(ui, error);
                     }
                 });
-                if let Some(error) = &self.last_error {
-                    selectable_error(ui, error);
-                }
-            });
-        });
+            },
+        );
         self.set_window_open(AppWindow::Tools, open);
     }
 
     fn tool_info_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::ToolInfo);
-        egui::Window::new("About the DLSS indicator")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(460.0)
-            .show(ctx, |ui| {
+        widgets::modal(
+            ctx,
+            "tool_info",
+            icons::INFO,
+            "About the DLSS indicator",
+            460.0,
+            &mut open,
+            |ui| {
                 ui.label("This changes NVIDIA's machine-wide DLSS indicator registry setting and affects every compatible game on this PC.");
                 ui.add_space(6.0);
                 ui.label("If another program changes the setting, DLSS Updater requires confirmation before applying or restoring it.");
-            });
+            },
+        );
         self.set_window_open(AppWindow::ToolInfo, open);
     }
 
     fn store_warnings_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::StoreWarnings);
-        egui::Window::new("Store discovery warnings")
-            .open(&mut open)
-            .default_width(560.0)
-            .show(ctx, |ui| {
+        widgets::modal(
+            ctx,
+            "store_warnings",
+            icons::WARNING,
+            "Store discovery warnings",
+            560.0,
+            &mut open,
+            |ui| {
                 for report in self.discovery_reports.iter().filter(|report| {
                     report.games_found == 0
                         && matches!(
@@ -747,7 +786,8 @@ impl DlssApp {
                     );
                     ui.separator();
                 }
-            });
+            },
+        );
         self.set_window_open(AppWindow::StoreWarnings, open);
     }
 
@@ -755,17 +795,21 @@ impl DlssApp {
         let mut open = self.open_windows.contains(&AppWindow::Releases);
         let mut remove_import = None;
         let mut action = None;
-        egui::Window::new("DLL sources")
-            .open(&mut open)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .fixed_size([700.0, 650.0])
-            .show(ctx, |ui| {
+        widgets::modal(
+            ctx,
+            "releases",
+            icons::PACKAGE,
+            "DLL sources",
+            700.0,
+            &mut open,
+            |ui| {
                 remove_import = self.render_imports(ui);
+                ui.add_space(8.0);
                 ui.separator();
-                ui.heading("Official releases");
-                self.render_catalog_status(ui);
-                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.strong("Official releases");
+                    self.render_catalog_status(ui);
+                });
                 if let Some(error) = &self.catalog_error {
                     selectable_error(ui, &format!("Catalog request failed: {error}"));
                     ui.label("Check network access and try Refresh catalog. Previously cached releases remain usable when available.");
@@ -773,18 +817,17 @@ impl DlssApp {
                     ui.weak("GitHub returned no matching stable Streamline SDK release archives.");
                 }
                 let busy = self.inspecting_release.is_some();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for release in &self.releases {
-                        action = release_group(
-                            ui,
-                            release,
-                            busy,
-                            self.release_errors.get(&release.metadata.id),
-                        )
-                        .or(action.take());
-                    }
-                });
-            });
+                for release in &self.releases {
+                    action = release_group(
+                        ui,
+                        release,
+                        busy,
+                        self.release_errors.get(&release.metadata.id),
+                    )
+                    .or(action.take());
+                }
+            },
+        );
         match action {
             Some(ReleaseAction::Inspect(id)) => {
                 self.inspecting_release = Some(id.clone());
@@ -804,7 +847,7 @@ impl DlssApp {
     fn render_imports(&mut self, ui: &mut egui::Ui) -> Option<[u8; 32]> {
         let mut remove = None;
         ui.horizontal(|ui| {
-            ui.heading("Imported DLLs");
+            ui.strong("Imported DLLs");
             if ui
                 .button(widgets::icon_text(icons::FOLDER_PLUS, "Import DLL…"))
                 .clicked()
@@ -856,45 +899,62 @@ impl DlssApp {
 
     fn activity_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::Activity);
-        egui::Window::new("Activity history")
-            .open(&mut open)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .default_width(560.0)
-            .show(ctx, |ui| {
+        widgets::modal(
+            ctx,
+            "activity",
+            icons::CLOCK_COUNTER_CLOCKWISE,
+            "Activity history",
+            600.0,
+            &mut open,
+            |ui| {
                 if self.persisted.activity.is_empty() {
                     ui.weak("No app-initiated changes have been recorded.");
                 }
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for record in self.persisted.activity.iter().rev() {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.monospace(format_timestamp(record.timestamp_unix));
-                            ui.strong(&record.kind);
-                            ui.label(&record.detail);
-                        });
-                        ui.separator();
-                    }
-                });
-            });
+                for record in self.persisted.activity.iter().rev() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.monospace(format_timestamp(record.timestamp_unix));
+                        ui.strong(&record.kind);
+                        ui.label(&record.detail);
+                    });
+                    ui.separator();
+                }
+            },
+        );
         self.set_window_open(AppWindow::Activity, open);
     }
 
     fn roots_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::Roots);
-        egui::Window::new("Game folders")
-            .open(&mut open)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .default_width(620.0)
-            .show(ctx, |ui| {
-                if self.persisted.custom_roots.is_empty() {
-                    ui.weak("No manual roots configured.");
-                }
+        widgets::modal(
+            ctx,
+            "roots",
+            icons::FOLDER_SIMPLE,
+            "Game folders",
+            620.0,
+            &mut open,
+            |ui| {
+                ui.strong("Automatic discovery");
                 for report in &self.discovery_reports {
                     ui.add(egui::Label::new(discovery_report_label(report)).selectable(true))
                         .on_hover_text(report.detail.as_deref().unwrap_or("No additional detail"));
                 }
+                ui.add_space(8.0);
                 ui.separator();
+                ui.horizontal(|ui| {
+                    ui.strong("Manually added folders");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui
+                            .button(widgets::icon_text(icons::FOLDER_PLUS, "Add game folder…"))
+                            .clicked()
+                            && let Some(root) = rfd::FileDialog::new().pick_folder()
+                        {
+                            self.add_custom_root(&root);
+                        }
+                    });
+                });
+                if self.persisted.custom_roots.is_empty() {
+                    ui.weak("No manual folders added. Use this for games no store reported.");
+                }
                 for root in &self.persisted.custom_roots {
                     ui.add(
                         egui::Label::new(
@@ -903,15 +963,8 @@ impl DlssApp {
                         .selectable(true),
                     );
                 }
-                ui.add_space(8.0);
-                if ui
-                    .button(widgets::icon_text(icons::FOLDER_PLUS, "Add game folder…"))
-                    .clicked()
-                    && let Some(root) = rfd::FileDialog::new().pick_folder()
-                {
-                    self.add_custom_root(&root);
-                }
-            });
+            },
+        );
         self.set_window_open(AppWindow::Roots, open);
     }
 
@@ -1519,32 +1572,33 @@ impl eframe::App for DlssApp {
             }
         }
         if !self.persisted.disclaimer_acknowledged {
-            egui::Window::new("Before you continue")
-                .collapsible(false)
-                .resizable(false)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-                .show(root.ctx(), |ui| {
-                    ui.set_max_width(440.0);
-                    widgets::banner(
-                        ui,
-                        theme::WARNING,
-                        icons::WARNING,
-                        "Online/anti-cheat games may detect DLL swaps and ban you.",
-                        false,
-                    );
-                    widgets::banner(
-                        ui,
-                        theme::WARNING,
-                        icons::WARNING,
-                        "Replacing Streamline DLLs may reduce performance or crash.",
-                        false,
-                    );
-                    ui.add_space(8.0);
-                    let acknowledge = widgets::primary_button("I understand");
-                    if ui.add(acknowledge).clicked() {
-                        self.persisted.disclaimer_acknowledged = true;
-                    }
-                });
+            // Deliberately not dismissible: unlike every other dialog, this one
+            // ignores Esc and backdrop clicks, because continuing has to be an
+            // explicit acknowledgement.
+            egui::Modal::new(egui::Id::new("disclaimer")).show(root.ctx(), |ui| {
+                ui.set_max_width(440.0);
+                ui.heading("Before you continue");
+                ui.add_space(8.0);
+                widgets::banner(
+                    ui,
+                    theme::WARNING,
+                    icons::WARNING,
+                    "Online/anti-cheat games may detect DLL swaps and ban you.",
+                    false,
+                );
+                widgets::banner(
+                    ui,
+                    theme::WARNING,
+                    icons::WARNING,
+                    "Replacing Streamline DLLs may reduce performance or crash.",
+                    false,
+                );
+                ui.add_space(8.0);
+                let acknowledge = widgets::primary_button("I understand");
+                if ui.add(acknowledge).clicked() {
+                    self.persisted.disclaimer_acknowledged = true;
+                }
+            });
         }
     }
 }

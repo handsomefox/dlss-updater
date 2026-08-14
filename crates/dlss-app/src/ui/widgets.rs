@@ -71,6 +71,61 @@ pub(crate) fn icon(icon: &str, size: f32, color: egui::Color32) -> egui::RichTex
         .color(color)
 }
 
+/// The one dialog shape used by every popup in the app.
+///
+/// Built on [`egui::Modal`] rather than [`egui::Window`] deliberately: a
+/// window remembers the position it was last dragged to, and because eframe
+/// persists egui memory, that position outlives the session. Reopening after
+/// the app was resized or made fullscreen then put the dialog wherever it sat
+/// in the old, smaller viewport instead of in view. A modal is re-centred on
+/// the current content rect every frame, so it is always where the user is
+/// looking, and it brings a backdrop plus Esc-to-close for free.
+///
+/// Sets `*open` to false when the user dismisses the dialog; returns whatever
+/// the body produced.
+pub(crate) fn modal<R>(
+    ctx: &egui::Context,
+    id: &str,
+    icon: &str,
+    title: &str,
+    width: f32,
+    open: &mut bool,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    // Leave room for the backdrop so a tall dialog never runs off-screen.
+    let available = ctx.content_rect().size();
+    let response = egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
+        ui.set_width(width.min(available.x - 48.0));
+        let mut close = false;
+        ui.horizontal(|ui| {
+            ui.label(self::icon(icon, 19.0, theme::ACCENT));
+            ui.heading(title);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                close = ui
+                    .add(
+                        egui::Button::new(self::icon(icons::X, 13.0, theme::TEXT_MUTED))
+                            .frame(false),
+                    )
+                    .on_hover_text("Close (Esc)")
+                    .clicked();
+            });
+        });
+        ui.separator();
+        let inner = egui::ScrollArea::vertical()
+            .max_height((available.y - 140.0).max(200.0))
+            .auto_shrink([false, true])
+            .show(ui, add_contents)
+            .inner;
+        (inner, close)
+    });
+    let dismissed = response.should_close();
+    let (inner, close) = response.inner;
+    if close || dismissed {
+        *open = false;
+    }
+    inner
+}
+
 /// Standard card surface: card background, hairline border, rounded corners.
 pub(crate) fn card<R>(
     ui: &mut egui::Ui,

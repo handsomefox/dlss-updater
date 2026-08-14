@@ -191,14 +191,14 @@ impl DlssApp {
         let mut keep_open = true;
         let mut apply = false;
         let mut cancel = false;
-        egui::Window::new("Review changes")
-            .collapsible(false)
-            .resizable(false)
-            .open(&mut keep_open)
-            .pivot(egui::Align2::CENTER_CENTER)
-            .default_pos(ctx.content_rect().center())
-            .default_width(560.0)
-            .show(ctx, |ui| {
+        widgets::modal(
+            ctx,
+            "review",
+            icons::LIST_CHECKS,
+            "Review changes",
+            600.0,
+            &mut keep_open,
+            |ui| {
                 review_warnings(ui, &review);
                 ui.add_space(6.0);
                 if review.ready {
@@ -216,6 +216,7 @@ impl DlssApp {
                 );
                 ui.add_space(8.0);
                 let checked = review.rows.iter().filter(|row| row.checked).count();
+                ui.separator();
                 ui.horizontal(|ui| {
                     let label = if checked == 1 {
                         "Apply 1 change".to_owned()
@@ -228,7 +229,8 @@ impl DlssApp {
                         cancel = true;
                     }
                 });
-            });
+            },
+        );
         if cancel {
             keep_open = false;
         }
