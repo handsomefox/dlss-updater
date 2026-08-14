@@ -199,6 +199,32 @@ pub struct DllMetadata {
     pub x86_64: bool,
 }
 
+/// Everything [`DllMetadata`] carries except the Authenticode verdict.
+///
+/// Establishing the signature status costs a full `WinVerifyTrust` chain
+/// evaluation, so the safety engine reads structure alone wherever it only
+/// needs to know *which bytes* are on disk. Trust is never inferred from a
+/// structure: a caller that must prove provenance calls
+/// [`crate::TrustVerifier::verify`] explicitly.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DllStructure {
+    pub version: Option<DllVersion>,
+    pub sha256: [u8; 32],
+    pub x86_64: bool,
+}
+
+impl DllMetadata {
+    /// Drops the Authenticode verdict, keeping the structural facts.
+    #[must_use]
+    pub fn structure(&self) -> DllStructure {
+        DllStructure {
+            version: self.version,
+            sha256: self.sha256,
+            x86_64: self.x86_64,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DllInstallation {
     pub id: DllInstallationId,
@@ -360,7 +386,7 @@ impl OperationPlan {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SwapResult {
     pub installation: DllInstallationId,
-    pub result: Result<DllMetadata, String>,
+    pub result: Result<DllStructure, String>,
     pub backup: Option<BackupRecord>,
     /// True when the swap failed solely because access was denied, signalling
     /// that retrying under elevation may succeed.

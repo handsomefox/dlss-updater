@@ -1,6 +1,6 @@
 use crate::{
-    DiscoveryOutcome, DllMetadata, SystemToolDefinition, SystemToolId, SystemToolState,
-    ToolChangePlan, ToolChangeResult, ToolRestorePoint, TrustPolicy, TrustReport,
+    DiscoveryOutcome, DllMetadata, DllStructure, SystemToolDefinition, SystemToolId,
+    SystemToolState, ToolChangePlan, ToolChangeResult, ToolRestorePoint, TrustPolicy, TrustReport,
 };
 use std::path::{Path, PathBuf};
 
@@ -57,11 +57,25 @@ pub trait GameLocator: Send + Sync {
     fn discover(&self) -> Result<DiscoveryOutcome, CoreError>;
 }
 pub trait DllInspector: Send + Sync {
-    /// Reads trusted metadata from a DLL candidate.
+    /// Reads trusted metadata from a DLL candidate, including its Authenticode
+    /// signature status.
     ///
     /// # Errors
     /// Returns an error when the file cannot be read or parsed.
     fn inspect(&self, path: &Path) -> Result<DllMetadata, CoreError>;
+
+    /// Reads only the structural facts about a DLL — architecture, version
+    /// resource, and content hash — skipping Authenticode evaluation.
+    ///
+    /// Implementations must never report a weaker structure than [`Self::inspect`]
+    /// would; they only omit the signature verdict. Callers that need to prove
+    /// provenance verify trust explicitly instead of reading it from here.
+    ///
+    /// # Errors
+    /// Returns an error when the file cannot be read or parsed.
+    fn inspect_structure(&self, path: &Path) -> Result<DllStructure, CoreError> {
+        Ok(self.inspect(path)?.structure())
+    }
 }
 pub trait TrustVerifier: Send + Sync {
     /// Verifies the platform signature policy for a DLL.

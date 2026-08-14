@@ -211,7 +211,7 @@ impl BackupStore {
         inspector: &dyn DllInspector,
         created_unix: i64,
     ) -> Result<BackupRecord, CoreError> {
-        let metadata = inspector.inspect(original)?;
+        let metadata = inspector.inspect_structure(original)?;
         if metadata.sha256 != expected_hash {
             return Err(CoreError::StalePlan);
         }
@@ -242,9 +242,12 @@ impl BackupStore {
             version: metadata.version,
             created_unix,
         };
-        let mut index = BackupIndex {
-            records: self.load_validated_report(inspector)?.usable,
-        };
+        // Append to the index as recorded rather than re-validating every
+        // stored object: each swap in a batch would otherwise re-hash and
+        // re-inspect the entire backup history, which grows with every
+        // operation. Readers validate each record before offering it for
+        // restore, so an entry that later goes bad is still never usable.
+        let mut index = self.load_index()?;
         if let Some(existing) = index.records.iter_mut().find(|existing| {
             existing.sha256 == record.sha256 && existing.original_path == record.original_path
         }) {
@@ -352,15 +355,14 @@ impl BackupStore {
         inspector: &dyn DllInspector,
     ) -> Result<(), CoreError> {
         let expected_path = self.root.join("objects").join(hex_hash(record.sha256));
-        if record.content_path != expected_path
-            || !expected_path.is_file()
-            || hash_file(&expected_path)? != record.sha256
-        {
+        if record.content_path != expected_path || !expected_path.is_file() {
             return Err(CoreError::Validation(
                 "backup index object path or hash is invalid".into(),
             ));
         }
-        let metadata = inspector.inspect(&expected_path)?;
+        // The structural inspection hashes the object itself, so the content
+        // check below covers what a separate `hash_file` pass would prove.
+        let metadata = inspector.inspect_structure(&expected_path)?;
         if metadata.sha256 != record.sha256
             || metadata.version != record.version
             || !metadata.x86_64
@@ -410,8 +412,8 @@ fn execute_swap(
     replacer: &dyn AtomicFileReplacer,
     backups: &BackupStore,
     timestamp_unix: i64,
-) -> Result<(crate::DllMetadata, BackupRecord), CoreError> {
-    let current = inspector.inspect(&swap.target_path)?;
+) -> Result<(crate::DllStructure, BackupRecord), CoreError> {
+    let current = inspector.inspect_structure(&swap.target_path)?;
     if current.sha256 != swap.expected_sha256 {
         return Err(CoreError::StalePlan);
     }
@@ -425,7 +427,7 @@ fn execute_swap(
         timestamp_unix,
     )?;
     replacer.replace(&swap.target_path, &swap.source_path, swap.source_sha256)?;
-    let installed = inspector.inspect(&swap.target_path)?;
+    let installed = inspector.inspect_structure(&swap.target_path)?;
     if installed.sha256 != swap.source_sha256 {
         let verification = CoreError::Validation("replacement verification hash mismatch".into());
         if let Err(rollback) =
@@ -1070,9 +1072,21 @@ mod tests {
         backups
             .commit(&current, hash_file(&current).unwrap(), &BytesInspector, 2)
             .unwrap();
+        // Committing appends without re-validating history, so the damaged
+        // entry survives in the raw index...
         let index = backups.load_index().unwrap();
-        assert_eq!(index.records.len(), 1);
-        assert!(index.records[0].original_path.ends_with("current.dll"));
+        assert_eq!(index.records.len(), 2);
+        assert!(
+            index
+                .records
+                .iter()
+                .any(|record| record.original_path.ends_with("current.dll"))
+        );
+        // ...but it is never offered to a caller that asks for usable backups.
+        let report = backups.load_validated_report(&BytesInspector).unwrap();
+        assert_eq!(report.usable.len(), 1);
+        assert!(report.usable[0].original_path.ends_with("current.dll"));
+        assert_eq!(report.rejected.len(), 1);
     }
 
     #[test]

@@ -15,11 +15,14 @@ pub fn is_managed_dll(name: &OsStr) -> bool {
     dlss_core::DllKind::classify(name).is_some()
 }
 
-pub fn scan_game(
+/// Walks a game folder and identifies every managed DLL without reading any
+/// file contents. Traversal failures are retained so a partially readable
+/// install is still reported as such.
+#[must_use]
+pub fn managed_dll_entries(
     game_id: &GameId,
     root: &Path,
-    inspector: &dyn DllInspector,
-) -> Vec<Result<DllInstallation, CoreError>> {
+) -> Vec<Result<(DllInstallationId, PathBuf), CoreError>> {
     WalkDir::new(root)
         .follow_links(false)
         .max_depth(12)
@@ -34,12 +37,26 @@ pub fn scan_game(
             )))),
         })
         .map(|entry| {
-            let entry = entry?;
-            let path = entry.into_path();
-            let metadata = inspector.inspect(&path)?;
+            let path = entry?.into_path();
             let relative = path.strip_prefix(root).unwrap_or(&path);
+            let id = DllInstallationId(format!("{}:{}", game_id.0, path_key(relative)));
+            Ok((id, path))
+        })
+        .collect()
+}
+
+pub fn scan_game(
+    game_id: &GameId,
+    root: &Path,
+    inspector: &dyn DllInspector,
+) -> Vec<Result<DllInstallation, CoreError>> {
+    managed_dll_entries(game_id, root)
+        .into_iter()
+        .map(|entry| {
+            let (id, path) = entry?;
+            let metadata = inspector.inspect(&path)?;
             Ok(DllInstallation {
-                id: DllInstallationId(format!("{}:{}", game_id.0, path_key(relative))),
+                id,
                 game_id: game_id.clone(),
                 file_name: path.file_name().unwrap_or_default().to_os_string(),
                 path,
@@ -47,6 +64,15 @@ pub fn scan_game(
             })
         })
         .collect()
+}
+
+/// Fills in the managed DLL installations for every discovered game.
+pub fn inspect_games(games: &mut [GameInstall], inspector: &dyn DllInspector) {
+    for game in games {
+        let inspected = scan_game(&game.id, &game.root, inspector);
+        game.inspection_errors = inspected.iter().filter(|result| result.is_err()).count();
+        game.dlls = inspected.into_iter().filter_map(Result::ok).collect();
+    }
 }
 
 /// Parses legacy and modern Steam `KeyValues` library formats.

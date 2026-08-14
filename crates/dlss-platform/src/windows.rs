@@ -3,13 +3,13 @@
 
 use dlss_core::{
     AtomicFileReplacer, BackupStore, BatchResult, CoreError, DLSS_INDICATOR_TOOL_ID,
-    DiscoveryOutcome, DiscoveryStatus, DllInspector, DllMetadata, DllVersion, ElevatedFilePlan,
-    ElevatedHelperPlan, GameId, GameInstall, GameLocator, KnownDirectories, NativeTrustFailure,
-    OperationPlan, PlannedSwap, PlatformCapabilities, PrivilegeBroker, RegistryValueSnapshot,
-    RegistryView, RevocationStatus, SignatureStatus, StoreDiscoveryReport, StoreKind,
-    SystemToolDefinition, SystemToolId, SystemToolProvider, SystemToolScope, SystemToolState,
-    ToolChangePlan, ToolChangeResult, ToolRestorePoint, TrustPolicy, TrustReport, TrustVerifier,
-    execute_plan, hash_file, indicator_state, now_unix, read_versioned_json_bytes,
+    DiscoveryOutcome, DiscoveryStatus, DllInspector, DllMetadata, DllStructure, DllVersion,
+    ElevatedFilePlan, ElevatedHelperPlan, GameId, GameInstall, GameLocator, KnownDirectories,
+    NativeTrustFailure, OperationPlan, PlannedSwap, PlatformCapabilities, PrivilegeBroker,
+    RegistryValueSnapshot, RegistryView, RevocationStatus, SignatureStatus, StoreDiscoveryReport,
+    StoreKind, SystemToolDefinition, SystemToolId, SystemToolProvider, SystemToolScope,
+    SystemToolState, ToolChangePlan, ToolChangeResult, ToolRestorePoint, TrustPolicy, TrustReport,
+    TrustVerifier, execute_plan, hash_file, indicator_state, now_unix, read_versioned_json_bytes,
     write_versioned_json,
 };
 use object::Object;
@@ -115,6 +115,20 @@ pub struct WindowsDllInspector;
 
 impl DllInspector for WindowsDllInspector {
     fn inspect(&self, path: &Path) -> Result<DllMetadata, CoreError> {
+        let structure = self.inspect_structure(path)?;
+        Ok(DllMetadata {
+            version: structure.version,
+            sha256: structure.sha256,
+            // The Authenticode chain evaluation dominates the cost of an
+            // inspection, which is why structure-only callers exist.
+            signature: WindowsTrustVerifier
+                .verify(path, TrustPolicy::Strict)?
+                .signature,
+            x86_64: structure.x86_64,
+        })
+    }
+
+    fn inspect_structure(&self, path: &Path) -> Result<DllStructure, CoreError> {
         let mut bytes = Vec::new();
         File::open(path)?.read_to_end(&mut bytes)?;
         let object = object::File::parse(&*bytes)
@@ -122,12 +136,9 @@ impl DllInspector for WindowsDllInspector {
         let x86_64 = object.format() == object::BinaryFormat::Pe
             && object.architecture() == object::Architecture::X86_64
             && object.kind() == object::ObjectKind::Dynamic;
-        Ok(DllMetadata {
+        Ok(DllStructure {
             version: file_version(path)?,
             sha256: Sha256::digest(&bytes).into(),
-            signature: WindowsTrustVerifier
-                .verify(path, TrustPolicy::Strict)?
-                .signature,
             x86_64,
         })
     }
@@ -156,9 +167,16 @@ impl StoreScan {
     }
 }
 
-impl GameLocator for WindowsGameLocator {
-    fn discover(&self) -> Result<DiscoveryOutcome, CoreError> {
-        let inspector = WindowsDllInspector;
+impl WindowsGameLocator {
+    /// Enumerates installed games from every store without opening any DLL.
+    ///
+    /// Store enumeration is registry and manifest work measured in
+    /// milliseconds; inspecting the DLLs inside each install is what makes a
+    /// full discovery expensive. Callers that only need to know *which games
+    /// exist* — such as the elevated helper confirming a plan's game — use
+    /// this instead of [`GameLocator::discover`].
+    #[must_use]
+    pub fn locate(&self) -> (Vec<GameInstall>, Vec<StoreDiscoveryReport>) {
         let steam = discover_steam();
         let epic = discover_epic();
         let gog = discover_gog();
@@ -171,16 +189,19 @@ impl GameLocator for WindowsGameLocator {
         games.extend(steam.games);
         games.extend(epic.games);
         games.extend(gog.games);
-        for game in &mut games {
-            let inspected = crate::scan_game(&game.id, &game.root, &inspector);
-            game.inspection_errors = inspected.iter().filter(|result| result.is_err()).count();
-            game.dlls = inspected.into_iter().filter_map(Result::ok).collect();
-        }
         games.sort_by_key(|game| game.name.to_lowercase());
         games.dedup_by(|right, left| right.id == left.id);
         for report in &reports {
             tracing::info!(store = %report.store, status = ?report.status, games = report.games_found, detail = ?report.detail, "store discovery completed");
         }
+        (games, reports)
+    }
+}
+
+impl GameLocator for WindowsGameLocator {
+    fn discover(&self) -> Result<DiscoveryOutcome, CoreError> {
+        let (mut games, reports) = self.locate();
+        crate::inspect_games(&mut games, &WindowsDllInspector);
         Ok(DiscoveryOutcome { games, reports })
     }
 }
@@ -1057,13 +1078,11 @@ impl Drop for StagedFilePlan {
 
 fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFilePlan, CoreError> {
     let game_root = plan.game_root.canonicalize()?;
-    let discovered_game = WindowsGameLocator
-        .discover()?
-        .games
-        .into_iter()
-        .find(|game| {
-            game.id == plan.game_id && game.root.canonicalize().ok() == Some(game_root.clone())
-        });
+    // Store enumeration alone proves the plan's game exists at the declared
+    // root; the DLLs under it are validated individually below.
+    let discovered_game = WindowsGameLocator.locate().0.into_iter().find(|game| {
+        game.id == plan.game_id && game.root.canonicalize().ok() == Some(game_root.clone())
+    });
     let manual_game = (plan.game_id.0.starts_with("manual:"))
         .then(|| crate::manual_install(&game_root))
         .transpose()?
@@ -1073,7 +1092,10 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
             "file plan does not belong to the declared game".into(),
         ));
     }
-    let installations = crate::scan_game(&plan.game_id, &game_root, &WindowsDllInspector)
+    // Enumerate the game's managed DLLs without inspecting them: only the
+    // handful of targets named by the plan need their contents proven, and
+    // each one is inspected individually below.
+    let installations = crate::managed_dll_entries(&plan.game_id, &game_root)
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
     let releases = base.join("cache/releases").canonicalize()?;
@@ -1102,15 +1124,14 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
                 "target is not a managed NVIDIA DLL".into(),
             ));
         }
-        let installation = installations
+        let (_, installation_path) = installations
             .iter()
-            .find(|installation| installation.id == swap.installation)
+            .find(|(id, _)| *id == swap.installation)
             .ok_or_else(|| {
                 CoreError::Validation("target is not a discovered DLL installation".into())
             })?;
-        if installation.game_id != plan.game_id
-            || installation.path.canonicalize()? != target
-            || installation.metadata.sha256 != swap.expected_sha256
+        if installation_path.canonicalize()? != target
+            || WindowsDllInspector.inspect_structure(&target)?.sha256 != swap.expected_sha256
         {
             return Err(CoreError::Validation(
                 "target does not match the discovered DLL installation".into(),
@@ -1165,7 +1186,10 @@ fn staged_source_policy(release_source: bool, backup_source: bool) -> TrustPolic
 }
 
 fn validate_nvidia_dll(path: &Path, policy: TrustPolicy) -> Result<(), CoreError> {
-    let metadata = WindowsDllInspector.inspect(path)?;
+    // Structure only: the trust verdict that matters here is the explicit
+    // policy-aware verification on the next line, not the strict-policy one an
+    // `inspect` would additionally compute and discard.
+    let metadata = WindowsDllInspector.inspect_structure(path)?;
     let trust = WindowsTrustVerifier.verify(path, policy)?;
     if !metadata.x86_64
         || metadata.version.is_none()
