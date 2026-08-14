@@ -136,6 +136,7 @@ enum AppWindow {
     Releases,
     Activity,
     Roots,
+    About,
 }
 
 /// Which main content the central panel shows.
@@ -968,6 +969,103 @@ impl DlssApp {
         self.set_window_open(AppWindow::Roots, open);
     }
 
+    /// Keyboard shortcuts for the three things done most often.
+    ///
+    /// Skipped entirely while a dialog is up, so Esc closes the dialog rather
+    /// than navigating behind it, and so typing in a dialog cannot trigger a
+    /// rescan.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        if !self.open_windows.is_empty()
+            || self.review.is_some()
+            || !self.persisted.disclaimer_acknowledged
+        {
+            return;
+        }
+        let (focus_search, rescan, back) = ctx.input_mut(|input| {
+            (
+                input.consume_key(egui::Modifiers::COMMAND, egui::Key::F),
+                input.consume_key(egui::Modifiers::NONE, egui::Key::F5),
+                input.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+            )
+        });
+        if focus_search {
+            ctx.memory_mut(|memory| memory.request_focus(ui::toolbar::search_field_id()));
+        }
+        if rescan && !self.runtime.scanning {
+            let _ = self.worker.commands.send(Command::Scan);
+        }
+        if back && matches!(self.view, View::Game(_)) {
+            self.view = View::Library;
+        }
+    }
+
+    /// Version, project link, and one-click access to the folders a user needs
+    /// when reporting a problem or inspecting what the app has stored.
+    fn about_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.open_windows.contains(&AppWindow::About);
+        widgets::modal(
+            ctx,
+            "about",
+            icons::INFO,
+            "About DLSS Updater",
+            520.0,
+            &mut open,
+            |ui| {
+                ui.label(
+                    egui::RichText::new(concat!("Version ", env!("CARGO_PKG_VERSION")))
+                        .color(theme::TEXT_MUTED),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    "Replaces official NVIDIA DLSS and Streamline DLLs in installed games. \
+                     Every change is planned against the installed file's hash, backed up, \
+                     and verified again after it is written.",
+                );
+                ui.add_space(6.0);
+                ui.hyperlink_to(
+                    widgets::icon_text(icons::ARROW_SQUARE_OUT, "Project page"),
+                    env!("CARGO_PKG_REPOSITORY"),
+                );
+                ui.add_space(10.0);
+                ui.separator();
+                ui.strong("Folders");
+                for (label, hint, directory) in [
+                    (
+                        "Open log folder",
+                        "Diagnostics logs to attach when reporting a problem",
+                        diagnostics::log_directory(),
+                    ),
+                    (
+                        "Open data folder",
+                        "Backups, the validated release cache, and imported DLLs",
+                        diagnostics::data_directory(),
+                    ),
+                ] {
+                    let Some(directory) = directory else {
+                        continue;
+                    };
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(widgets::icon_text(icons::FOLDER_SIMPLE, label))
+                            .on_hover_text(directory.display().to_string())
+                            .clicked()
+                        {
+                            diagnostics::reveal(&directory);
+                        }
+                        ui.weak(hint);
+                    });
+                }
+                ui.add_space(10.0);
+                ui.separator();
+                ui.weak(
+                    "Bundled fonts keep their own licenses: Inter and JetBrains Mono \
+                     (SIL Open Font License 1.1) · Phosphor Icons (MIT).",
+                );
+            },
+        );
+        self.set_window_open(AppWindow::About, open);
+    }
+
     fn add_custom_root(&mut self, root: &std::path::Path) {
         match root.canonicalize() {
             Ok(root) => {
@@ -1457,6 +1555,7 @@ impl eframe::App for DlssApp {
         if !self.persisted.disclaimer_acknowledged {
             root.disable();
         }
+        self.handle_shortcuts(root.ctx());
         egui::Panel::top("toolbar").show(root, |ui| {
             ui.add_space(5.0);
             self.toolbar(ui);
@@ -1514,6 +1613,9 @@ impl eframe::App for DlssApp {
         }
         if self.open_windows.contains(&AppWindow::Roots) {
             self.roots_window(root.ctx());
+        }
+        if self.open_windows.contains(&AppWindow::About) {
+            self.about_window(root.ctx());
         }
         if self.review.is_some() {
             self.review_window(root.ctx());

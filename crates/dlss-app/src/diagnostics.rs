@@ -27,7 +27,9 @@ pub(crate) fn init() {
         .try_init();
 }
 
-fn log_directory() -> Option<PathBuf> {
+/// The folder this run appends its diagnostics log to, so the About dialog can
+/// point the user at the file to attach when reporting a problem.
+pub(crate) fn log_directory() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         std::env::var_os("LOCALAPPDATA")
@@ -42,6 +44,37 @@ fn log_directory() -> Option<PathBuf> {
                 std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
             })
             .map(|base| base.join("dlss-updater/logs"))
+    }
+}
+
+/// The folder holding backups, the release cache, and imported DLLs.
+pub(crate) fn data_directory() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|base| base.join("DLSS Updater"))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Reveals a folder in the system file manager, creating it first so the
+/// shell never opens on a missing path.
+pub(crate) fn reveal(directory: &std::path::Path) {
+    if let Err(error) = fs::create_dir_all(directory) {
+        tracing::warn!(path = %directory.display(), %error, "could not create folder before opening it");
+        return;
+    }
+    let opener = if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    if let Err(error) = std::process::Command::new(opener).arg(directory).spawn() {
+        tracing::warn!(path = %directory.display(), %error, "could not open folder");
     }
 }
 
