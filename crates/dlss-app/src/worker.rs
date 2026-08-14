@@ -594,7 +594,13 @@ fn canonicalize_roots(roots: &mut Vec<PathBuf>) {
 
 fn scan(events: &EventSink, roots: &[PathBuf], games: &mut Vec<GameInstall>) {
     events.send(Event::ScanStarted);
+    let started = std::time::Instant::now();
     let outcome = scan_roots(roots);
+    tracing::info!(
+        games = outcome.games.len(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "library scan completed"
+    );
     games.clone_from(&outcome.games);
     events.send(Event::ScanFinished(Ok(outcome)));
 }

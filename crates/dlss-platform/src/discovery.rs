@@ -7,6 +7,12 @@ use std::{
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
+    sync::{
+        Mutex, PoisonError,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    thread,
+    time::Instant,
 };
 use walkdir::WalkDir;
 
@@ -52,27 +58,111 @@ pub fn scan_game(
 ) -> Vec<Result<DllInstallation, CoreError>> {
     managed_dll_entries(game_id, root)
         .into_iter()
-        .map(|entry| {
-            let (id, path) = entry?;
-            let metadata = inspector.inspect(&path)?;
-            Ok(DllInstallation {
-                id,
-                game_id: game_id.clone(),
-                file_name: path.file_name().unwrap_or_default().to_os_string(),
-                path,
-                metadata,
-            })
-        })
+        .map(|entry| inspect_entry(entry, game_id, inspector))
         .collect()
 }
 
 /// Fills in the managed DLL installations for every discovered game.
+///
+/// Games are independent, and both phases of the work — walking a large
+/// install tree and reading DLL contents — are dominated by waiting on the
+/// filesystem, so the games are spread across a small pool of threads and
+/// handed out one at a time. Dynamic hand-out matters because install sizes
+/// differ by orders of magnitude; a fixed split would leave one thread walking
+/// a 200 GB game while the rest idle.
 pub fn inspect_games(games: &mut [GameInstall], inspector: &dyn DllInspector) {
-    for game in games {
-        let inspected = scan_game(&game.id, &game.root, inspector);
+    let started = Instant::now();
+    let inputs: Vec<(GameId, PathBuf)> = games
+        .iter()
+        .map(|game| (game.id.clone(), game.root.clone()))
+        .collect();
+    let next = AtomicUsize::new(0);
+    let walk_nanos = AtomicU64::new(0);
+    let inspect_nanos = AtomicU64::new(0);
+    let outcomes = Mutex::new(Vec::with_capacity(inputs.len()));
+    let workers = worker_count(inputs.len());
+    thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((game_id, root)) = inputs.get(index) else {
+                        break;
+                    };
+                    let walk_started = Instant::now();
+                    let entries = managed_dll_entries(game_id, root);
+                    walk_nanos.fetch_add(elapsed_nanos(walk_started), Ordering::Relaxed);
+
+                    let inspect_started = Instant::now();
+                    let inspected: Vec<_> = entries
+                        .into_iter()
+                        .map(|entry| inspect_entry(entry, game_id, inspector))
+                        .collect();
+                    inspect_nanos.fetch_add(elapsed_nanos(inspect_started), Ordering::Relaxed);
+                    outcomes
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .push((index, inspected));
+                }
+            });
+        }
+    });
+    // A worker that panicked mid-push poisons the lock; keep every result that
+    // did land rather than losing the whole scan.
+    let outcomes = outcomes
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner);
+    let mut dlls = 0;
+    let mut errors = 0;
+    for (index, inspected) in outcomes {
+        let game = &mut games[index];
         game.inspection_errors = inspected.iter().filter(|result| result.is_err()).count();
         game.dlls = inspected.into_iter().filter_map(Result::ok).collect();
+        dlls += game.dlls.len();
+        errors += game.inspection_errors;
     }
+    tracing::info!(
+        games = games.len(),
+        dlls,
+        errors,
+        workers,
+        elapsed_ms = started.elapsed().as_millis(),
+        walk_thread_ms = walk_nanos.load(Ordering::Relaxed) / 1_000_000,
+        inspect_thread_ms = inspect_nanos.load(Ordering::Relaxed) / 1_000_000,
+        "library inspection completed"
+    );
+}
+
+fn inspect_entry(
+    entry: Result<(DllInstallationId, PathBuf), CoreError>,
+    game_id: &GameId,
+    inspector: &dyn DllInspector,
+) -> Result<DllInstallation, CoreError> {
+    let (id, path) = entry?;
+    let metadata = inspector.inspect(&path)?;
+    Ok(DllInstallation {
+        id,
+        game_id: game_id.clone(),
+        file_name: path.file_name().unwrap_or_default().to_os_string(),
+        path,
+        metadata,
+    })
+}
+
+/// Threads to spread discovery across. Capped well below a big machine's core
+/// count: past a handful of concurrent readers the storage device, not the
+/// CPU, sets the pace, and extra threads only add seek contention.
+fn worker_count(games: usize) -> usize {
+    const MAX_WORKERS: usize = 8;
+    thread::available_parallelism()
+        .map_or(4, std::num::NonZero::get)
+        .min(MAX_WORKERS)
+        .min(games)
+        .max(1)
+}
+
+fn elapsed_nanos(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// Parses legacy and modern Steam `KeyValues` library formats.
@@ -551,6 +641,59 @@ mod tests {
         let game = manual_install(directory.path()).unwrap();
         assert!(game.id.0.starts_with("manual:"));
         assert_eq!(game.root, directory.path().canonicalize().unwrap());
+    }
+
+    /// Reports the first byte of the file as its hash, so a test can tell which
+    /// game's DLL an inspection result came from.
+    struct MarkerInspector;
+    impl DllInspector for MarkerInspector {
+        fn inspect(&self, path: &Path) -> Result<dlss_core::DllMetadata, CoreError> {
+            let bytes = fs::read(path)?;
+            let mut sha256 = [0_u8; 32];
+            sha256[0] = *bytes.first().unwrap_or(&0);
+            Ok(dlss_core::DllMetadata {
+                version: None,
+                sha256,
+                signature: dlss_core::SignatureStatus::Unavailable,
+                x86_64: true,
+            })
+        }
+    }
+
+    #[test]
+    fn parallel_inspection_keeps_every_result_with_its_own_game() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut games: Vec<GameInstall> = (0..24_u8)
+            .map(|index| {
+                let root = directory.path().join(format!("game-{index}"));
+                fs::create_dir_all(root.join("bin")).unwrap();
+                fs::write(root.join("bin/nvngx_dlss.dll"), [index]).unwrap();
+                GameInstall {
+                    id: GameId(format!("test:{index}")),
+                    name: format!("Game {index}"),
+                    store: StoreKind::Manual,
+                    root,
+                    dlls: Vec::new(),
+                    inspection_errors: 0,
+                }
+            })
+            .collect();
+
+        inspect_games(&mut games, &MarkerInspector);
+
+        for (index, game) in games.iter().enumerate() {
+            let index = u8::try_from(index).unwrap();
+            assert_eq!(game.inspection_errors, 0);
+            assert_eq!(game.dlls.len(), 1, "game {index} lost its DLL");
+            let dll = &game.dlls[0];
+            assert_eq!(dll.game_id, game.id);
+            assert!(dll.path.starts_with(&game.root));
+            assert!(dll.id.0.starts_with(&format!("{}:", game.id.0)));
+            assert_eq!(
+                dll.metadata.sha256[0], index,
+                "game {index} received another game's inspection"
+            );
+        }
     }
 
     #[test]
