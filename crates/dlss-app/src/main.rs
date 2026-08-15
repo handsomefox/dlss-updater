@@ -679,10 +679,7 @@ impl DlssApp {
         let mut open = self.open_windows.contains(&AppWindow::Tools);
         widgets::modal(
             ctx,
-            "tools",
-            icons::WRENCH,
-            "Global tools",
-            520.0,
+            widgets::dialog("tools", icons::WRENCH, "Global tools", 520.0),
             &mut open,
             |ui| {
                 widgets::banner(
@@ -746,10 +743,7 @@ impl DlssApp {
         let mut open = self.open_windows.contains(&AppWindow::ToolInfo);
         widgets::modal(
             ctx,
-            "tool_info",
-            icons::INFO,
-            "About the DLSS indicator",
-            460.0,
+            widgets::dialog("tool_info", icons::INFO, "About the DLSS indicator", 460.0),
             &mut open,
             |ui| {
                 ui.label("This changes NVIDIA's machine-wide DLSS indicator registry setting and affects every compatible game on this PC.");
@@ -764,10 +758,12 @@ impl DlssApp {
         let mut open = self.open_windows.contains(&AppWindow::StoreWarnings);
         widgets::modal(
             ctx,
-            "store_warnings",
-            icons::WARNING,
-            "Store discovery warnings",
-            560.0,
+            widgets::dialog(
+                "store_warnings",
+                icons::WARNING,
+                "Store discovery warnings",
+                560.0,
+            ),
             &mut open,
             |ui| {
                 for report in self.discovery_reports.iter().filter(|report| {
@@ -798,10 +794,7 @@ impl DlssApp {
         let mut action = None;
         widgets::modal(
             ctx,
-            "releases",
-            icons::PACKAGE,
-            "DLL sources",
-            700.0,
+            widgets::dialog("releases", icons::PACKAGE, "DLL sources", 700.0),
             &mut open,
             |ui| {
                 remove_import = self.render_imports(ui);
@@ -902,10 +895,12 @@ impl DlssApp {
         let mut open = self.open_windows.contains(&AppWindow::Activity);
         widgets::modal(
             ctx,
-            "activity",
-            icons::CLOCK_COUNTER_CLOCKWISE,
-            "Activity history",
-            600.0,
+            widgets::dialog(
+                "activity",
+                icons::CLOCK_COUNTER_CLOCKWISE,
+                "Activity history",
+                600.0,
+            ),
             &mut open,
             |ui| {
                 if self.persisted.activity.is_empty() {
@@ -928,10 +923,7 @@ impl DlssApp {
         let mut open = self.open_windows.contains(&AppWindow::Roots);
         widgets::modal(
             ctx,
-            "roots",
-            icons::FOLDER_SIMPLE,
-            "Game folders",
-            620.0,
+            widgets::dialog("roots", icons::FOLDER_SIMPLE, "Game folders", 620.0),
             &mut open,
             |ui| {
                 ui.strong("Automatic discovery");
@@ -1005,10 +997,7 @@ impl DlssApp {
         let mut open = self.open_windows.contains(&AppWindow::About);
         widgets::modal(
             ctx,
-            "about",
-            icons::INFO,
-            "About DLSS Updater",
-            520.0,
+            widgets::dialog("about", icons::INFO, "About DLSS Updater", 520.0),
             &mut open,
             |ui| {
                 ui.label(

@@ -191,12 +191,13 @@ impl DlssApp {
         let mut keep_open = true;
         let mut apply = false;
         let mut cancel = false;
-        widgets::modal(
+        // The body decides how many rows are checked and the pinned footer
+        // renders from it, both within one frame, so the button label and its
+        // enabled state never lag a checkbox click.
+        let checked = std::cell::Cell::new(0_usize);
+        widgets::modal_with_actions(
             ctx,
-            "review",
-            icons::LIST_CHECKS,
-            "Review changes",
-            600.0,
+            widgets::dialog("review", icons::LIST_CHECKS, "Review changes", 600.0),
             &mut keep_open,
             |ui| {
                 review_warnings(ui, &review);
@@ -214,8 +215,13 @@ impl DlssApp {
                     "If Windows denies access to a target, the app will request elevation \
                      only for the denied replacements.",
                 );
+                checked.set(review.rows.iter().filter(|row| row.checked).count());
+            },
+            // Pinned below the scrolling list: with many staged changes the
+            // list is what scrolls, never the button that applies them.
+            |ui| {
+                let checked = checked.get();
                 ui.add_space(8.0);
-                let checked = review.rows.iter().filter(|row| row.checked).count();
                 ui.separator();
                 ui.horizontal(|ui| {
                     let label = if checked == 1 {

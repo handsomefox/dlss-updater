@@ -85,37 +85,65 @@ pub(crate) fn icon(icon: &str, size: f32, color: egui::Color32) -> egui::RichTex
 /// the body produced.
 pub(crate) fn modal<R>(
     ctx: &egui::Context,
-    id: &str,
-    icon: &str,
-    title: &str,
-    width: f32,
+    dialog: Dialog<'_>,
     open: &mut bool,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
+    modal_with_actions(ctx, dialog, open, add_contents, |_| {})
+}
+
+/// How a dialog presents itself: identity, header, and preferred width.
+#[derive(Clone, Copy)]
+pub(crate) struct Dialog<'a> {
+    id: &'a str,
+    icon: &'a str,
+    title: &'a str,
+    width: f32,
+}
+
+pub(crate) fn dialog<'a>(id: &'a str, icon: &'a str, title: &'a str, width: f32) -> Dialog<'a> {
+    Dialog {
+        id,
+        icon,
+        title,
+        width,
+    }
+}
+
+/// A dialog whose primary action stays pinned below the scrolling body.
+///
+/// Anything the user must be able to reach — "Apply N changes" — belongs in
+/// `actions`, not in the body: a long list of staged changes would otherwise
+/// push the button out of the scroll viewport.
+pub(crate) fn modal_with_actions<R>(
+    ctx: &egui::Context,
+    dialog: Dialog<'_>,
+    open: &mut bool,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+    actions: impl FnOnce(&mut egui::Ui),
+) -> R {
     // Leave room for the backdrop so a tall dialog never runs off-screen.
     let available = ctx.content_rect().size();
-    let response = egui::Modal::new(egui::Id::new(id)).show(ctx, |ui| {
-        ui.set_width(width.min(available.x - 48.0));
+    let response = egui::Modal::new(egui::Id::new(dialog.id)).show(ctx, |ui| {
+        ui.set_width(dialog.width.min(available.x - 48.0));
         let mut close = false;
         ui.horizontal(|ui| {
-            ui.label(self::icon(icon, 19.0, theme::ACCENT));
-            ui.heading(title);
+            ui.label(icon(dialog.icon, 19.0, theme::ACCENT));
+            ui.heading(dialog.title);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 close = ui
-                    .add(
-                        egui::Button::new(self::icon(icons::X, 13.0, theme::TEXT_MUTED))
-                            .frame(false),
-                    )
+                    .add(egui::Button::new(icon(icons::X, 13.0, theme::TEXT_MUTED)).frame(false))
                     .on_hover_text("Close (Esc)")
                     .clicked();
             });
         });
         ui.separator();
         let inner = egui::ScrollArea::vertical()
-            .max_height((available.y - 140.0).max(200.0))
+            .max_height((available.y - 190.0).max(180.0))
             .auto_shrink([false, true])
             .show(ui, add_contents)
             .inner;
+        actions(ui);
         (inner, close)
     });
     let dismissed = response.should_close();
