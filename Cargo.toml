@@ -15,7 +15,7 @@ eframe = { version = "=0.35.0", default-features = false, features = ["default_f
 egui_extras = "=0.35.0"
 jiff = "=0.2.32"
 object = { version = "=0.39.1", features = ["pe"] }
-serde = { version = "=1.0.228", features = ["derive"] }
+serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.150"
 sha2 = "=0.11.0"
 thiserror = "=2.0.18"
