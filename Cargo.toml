@@ -16,7 +16,7 @@ egui_extras = "=0.35.0"
 jiff = "=0.2.32"
 object = { version = "=0.39.1", features = ["pe"] }
 serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = "=1.0.150"
+serde_json = "=1.0.151"
 sha2 = "=0.11.0"
 thiserror = "=2.0.18"
 tracing = "=0.1.44"
