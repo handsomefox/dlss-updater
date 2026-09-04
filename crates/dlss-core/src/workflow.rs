@@ -218,6 +218,11 @@ impl BackupStore {
         let content_dir = self.root.join("objects");
         fs::create_dir_all(&content_dir)?;
         let content_path = content_dir.join(hex_hash(expected_hash));
+        if content_path.exists() && hash_file(&content_path)? != expected_hash {
+            return Err(CoreError::Validation(
+                "existing backup object has an unexpected hash".into(),
+            ));
+        }
         if !content_path.exists() {
             let temporary = content_path.with_extension("partial");
             copy_flush_hash(original, &temporary, expected_hash)?;
@@ -852,6 +857,45 @@ mod tests {
         };
         let result = plan_target_profile("n", &[installed], &[], &[wrong], &[], &profile);
         assert!(matches!(result, Err(CoreError::Validation(_))));
+    }
+
+    #[test]
+    fn corrupt_existing_backup_prevents_replacement() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target.dll");
+        let source = dir.path().join("source.dll");
+        fs::write(&target, b"original").unwrap();
+        fs::write(&source, b"updated").unwrap();
+        let backups = BackupStore::new(dir.path().join("backups"));
+        let expected = hash_file(&target).unwrap();
+        let record = backups
+            .commit(&target, expected, &BytesInspector, 0)
+            .unwrap();
+        // An intact object can be reused without losing the original bytes.
+        backups
+            .commit(&target, expected, &BytesInspector, 1)
+            .unwrap();
+        fs::write(&record.content_path, b"damaged").unwrap();
+        let swap = PlannedSwap {
+            game: GameId("g".into()),
+            installation: DllInstallationId("d".into()),
+            target_path: target.clone(),
+            expected_sha256: expected,
+            source_path: source.clone(),
+            source_sha256: hash_file(&source).unwrap(),
+            comparison: Comparison::Upgrade,
+        };
+        let result = execute_swap(
+            &swap,
+            &BytesInspector,
+            &CopyReplacer {
+                fail: Mutex::new(Vec::new()),
+            },
+            &backups,
+            2,
+        );
+        assert!(result.unwrap_err().to_string().contains("backup object"));
+        assert_eq!(fs::read(target).unwrap(), b"original");
     }
 
     #[test]
