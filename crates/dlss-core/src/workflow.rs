@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     ffi::OsStr,
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -224,21 +224,7 @@ impl BackupStore {
             ));
         }
         if !content_path.exists() {
-            let temporary = content_path.with_extension("partial");
-            copy_flush_hash(original, &temporary, expected_hash)?;
-            match fs::rename(&temporary, &content_path) {
-                Ok(()) => {}
-                Err(error) if content_path.exists() => {
-                    let _ = fs::remove_file(&temporary);
-                    if hash_file(&content_path)? != expected_hash {
-                        return Err(CoreError::Validation(
-                            "existing backup object has an unexpected hash".into(),
-                        ));
-                    }
-                    let _ = error;
-                }
-                Err(error) => return Err(error.into()),
-            }
+            copy_flush_hash(original, &content_path, expected_hash)?;
         }
         let record = BackupRecord {
             sha256: expected_hash,
@@ -471,10 +457,9 @@ pub(crate) fn copy_flush_hash(
     expected: [u8; 32],
 ) -> Result<(), CoreError> {
     let mut input = File::open(source)?;
-    let mut output = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(destination)?;
+    // AtomicWriteFile owns a unique temporary file and cleans it up on errors.
+    // A leftover staging file from an interrupted run cannot block this copy.
+    let mut output = atomic_write_file::AtomicWriteFile::open(destination)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
@@ -486,11 +471,10 @@ pub(crate) fn copy_flush_hash(
         output.write_all(&buffer[..read])?;
     }
     output.flush()?;
-    output.sync_all()?;
     if <[u8; 32]>::from(hasher.finalize()) != expected {
-        let _ = fs::remove_file(destination);
         return Err(CoreError::Validation("copy hash mismatch".into()));
     }
+    output.commit()?;
     Ok(())
 }
 
@@ -857,6 +841,39 @@ mod tests {
         };
         let result = plan_target_profile("n", &[installed], &[], &[wrong], &[], &profile);
         assert!(matches!(result, Err(CoreError::Validation(_))));
+    }
+
+    #[test]
+    fn leftover_partial_does_not_block_backup() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target.dll");
+        fs::write(&target, b"original").unwrap();
+        let expected = hash_file(&target).unwrap();
+        let root = dir.path().join("backups");
+        let objects = root.join("objects");
+        fs::create_dir_all(&objects).unwrap();
+        let stale = objects.join(hex_hash(expected)).with_extension("partial");
+        fs::write(&stale, b"interrupted copy").unwrap();
+        let backup = BackupStore::new(root)
+            .commit(&target, expected, &BytesInspector, 0)
+            .unwrap();
+        assert_eq!(hash_file(&backup.content_path).unwrap(), expected);
+        assert_eq!(fs::read(stale).unwrap(), b"interrupted copy");
+    }
+
+    #[test]
+    fn failed_copy_preserves_destination_and_can_be_retried() {
+        let dir = tempdir().unwrap();
+        let source = dir.path().join("source.dll");
+        let destination = dir.path().join("object");
+        fs::write(&source, b"source").unwrap();
+        fs::write(&destination, b"existing").unwrap();
+        assert!(copy_flush_hash(&source, &destination, [0; 32]).is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"existing");
+        let expected = hash_file(&source).unwrap();
+        copy_flush_hash(&source, &destination, expected).unwrap();
+        assert_eq!(hash_file(&destination).unwrap(), expected);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
     }
 
     #[test]
