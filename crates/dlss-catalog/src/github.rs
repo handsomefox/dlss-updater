@@ -297,18 +297,27 @@ struct ApiAsset {
     digest: Option<String>,
 }
 
-#[expect(
-    clippy::case_sensitive_file_extension_comparisons,
-    reason = "official release asset names are matched with a normalized lowercase string"
-)]
+/// Picks the x86-64 desktop archive out of one release.
+///
+/// Since v2.14.1 a release also carries `-aarch64` and `-arm64ec` archives,
+/// and the GitHub API lists them before the x86-64 one. Their DLLs live under
+/// `bin/arm64`, so extraction finds no `bin/x64` candidate and the release
+/// fails to prepare. Match the exact `streamline-sdk-<tag>.zip` name, which no
+/// architecture-suffixed archive can satisfy. If NVIDIA ever renames the
+/// x86-64 archive, the release disappears from the catalog instead of
+/// downloading the wrong architecture.
 fn select_asset(release: ApiRelease) -> Option<OfficialAsset> {
     if release.draft || release.prerelease {
         return None;
     }
-    let asset = release.assets.into_iter().find(|asset| {
-        let name = asset.name.to_ascii_lowercase();
-        name.starts_with("streamline-sdk-v") && name.ends_with(".zip")
-    })?;
+    let wanted = format!(
+        "streamline-sdk-{}.zip",
+        release.tag_name.to_ascii_lowercase()
+    );
+    let asset = release
+        .assets
+        .into_iter()
+        .find(|asset| asset.name.to_ascii_lowercase() == wanted)?;
     let digest = asset.digest.as_deref().and_then(parse_digest);
     Some(OfficialAsset {
         release: ReleaseMetadata {
@@ -454,6 +463,45 @@ mod tests {
             ],
         };
         assert_eq!(select_asset(release).unwrap().download_url, "good");
+    }
+
+    fn arch_release(assets: &[(&str, &str)]) -> ApiRelease {
+        ApiRelease {
+            tag_name: "v2.14.1".into(),
+            published_at: "2026-09-08T15:29:48Z".into(),
+            draft: false,
+            prerelease: false,
+            assets: assets
+                .iter()
+                .map(|(name, url)| ApiAsset {
+                    name: (*name).into(),
+                    browser_download_url: (*url).into(),
+                    size: 1,
+                    digest: None,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn skips_arm_archives_listed_before_the_x86_64_one() {
+        let release = arch_release(&[
+            ("streamline-sdk-v2.14.1-aarch64.zip", "arm"),
+            ("streamline-sdk-v2.14.1-arm64ec.zip", "armec"),
+            ("streamline-sdk-v2.14.1.zip", "x64"),
+        ]);
+        let selected = select_asset(release).unwrap();
+        assert_eq!(selected.download_url, "x64");
+        assert_eq!(selected.release.asset_name, "streamline-sdk-v2.14.1.zip");
+    }
+
+    #[test]
+    fn rejects_a_release_without_an_x86_64_archive() {
+        let release = arch_release(&[
+            ("streamline-sdk-v2.14.1-aarch64.zip", "arm"),
+            ("streamline-sdk-v2.14.1-arm64ec.zip", "armec"),
+        ]);
+        assert!(select_asset(release).is_none());
     }
 
     #[test]

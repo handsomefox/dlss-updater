@@ -23,7 +23,11 @@ enum CandidateTrust {
     Rejected(String),
 }
 
-pub const CATALOG_SCHEMA_VERSION: u32 = 1;
+// Bumped to 2 so builds that select release assets by exact name discard the
+// index a 1.1.1 build wrote. That index holds an ETag alongside asset URLs
+// picked by the old rule, and GitHub answers a request carrying that ETag with
+// 304, which would keep the wrong URLs in place until NVIDIA publishes again.
+pub const CATALOG_SCHEMA_VERSION: u32 = 2;
 pub const PREPARED_RELEASE_SCHEMA_VERSION: u32 = 1;
 const PREPARED_MANIFEST: &str = "manifest.json";
 
@@ -132,15 +136,27 @@ pub struct CatalogCacheIndex {
 }
 
 impl CatalogCacheIndex {
-    /// Loads the cache index or returns an empty index when it does not exist.
+    /// Loads the cache index. Returns an empty index when the file does not
+    /// exist, or when this build cannot read the persisted envelope.
     ///
     /// # Errors
-    /// Returns an error when the persisted envelope is unreadable or invalid.
+    /// Returns an error when the file exists but cannot be read from disk.
     pub fn load(path: &Path) -> Result<Self, dlss_core::CoreError> {
         if !path.exists() {
             return Ok(Self::default());
         }
-        dlss_core::read_versioned_json(path, CATALOG_SCHEMA_VERSION)
+        match dlss_core::read_versioned_json(path, CATALOG_SCHEMA_VERSION) {
+            Ok(index) => Ok(index),
+            // The index caches public release metadata and nothing else. Every
+            // archive it points at is still checked against its recorded size
+            // and digest, and every DLL against its PE headers and signature.
+            // An index this build cannot parse is a cache miss, not a failure.
+            Err(dlss_core::CoreError::Validation(reason)) => {
+                tracing::info!(reason, "discarding an unreadable release catalog cache");
+                Ok(Self::default())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Atomically persists the cache index.
@@ -984,7 +1000,11 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(CatalogCacheIndex::load(&path).is_err());
+        let loaded = CatalogCacheIndex::load(&path).unwrap();
+        assert!(
+            loaded.releases.is_empty() && loaded.assets.is_empty() && loaded.etag.is_none(),
+            "an index from an older schema must carry nothing forward"
+        );
         assert!(
             path.exists(),
             "schema invalidation must not remove cached artifacts"
