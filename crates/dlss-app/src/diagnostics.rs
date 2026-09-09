@@ -68,12 +68,15 @@ pub(crate) fn reveal(directory: &std::path::Path) {
         tracing::warn!(path = %directory.display(), %error, "could not create folder before opening it");
         return;
     }
-    let opener = if cfg!(windows) {
-        "explorer"
-    } else {
-        "xdg-open"
-    };
-    if let Err(error) = std::process::Command::new(opener).arg(directory).spawn() {
+    #[cfg(windows)]
+    if let Err(error) = dlss_platform::windows::open_folder(directory) {
+        tracing::warn!(path = %directory.display(), %error, "could not open folder");
+    }
+    #[cfg(not(windows))]
+    if let Err(error) = std::process::Command::new("xdg-open")
+        .arg(directory)
+        .spawn()
+    {
         tracing::warn!(path = %directory.display(), %error, "could not open folder");
     }
 }

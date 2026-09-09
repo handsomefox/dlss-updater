@@ -48,6 +48,7 @@ use windows::{
         UI::Shell::{
             FOLDERID_LocalAppData, FOLDERID_ProgramData, KNOWN_FOLDER_FLAG,
             SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SHGetKnownFolderPath, ShellExecuteExW,
+            ShellExecuteW,
         },
         UI::WindowsAndMessaging::SW_SHOWNORMAL,
     },
@@ -109,6 +110,50 @@ fn shell_execute_error(error: &windows::core::Error) -> CoreError {
     } else {
         windows_error(error)
     }
+}
+
+/// Values at or below this mean `ShellExecuteW` failed. Above it, the return
+/// value is a legacy instance handle.
+const SHELL_EXECUTE_MIN_SUCCESS: usize = 32;
+
+/// Opens a folder in Explorer.
+///
+/// Spawning `explorer.exe` as a child process is unreliable: Explorer hands the
+/// path to the running shell and exits, and the launch itself can fail before
+/// any window appears. `ShellExecuteW` is the documented way to ask the shell
+/// to open a path, and it starts no process of ours.
+///
+/// # Errors
+/// Returns an error when the path cannot be passed to the shell, or when the
+/// shell refuses to open it.
+pub fn open_folder(directory: &Path) -> Result<(), CoreError> {
+    let path = wide(directory);
+    // `wide` appends the terminator, so a NUL anywhere earlier came from the
+    // path itself and would truncate the argument.
+    if path[..path.len() - 1].contains(&0) {
+        return Err(CoreError::Validation("folder path contains NUL".into()));
+    }
+    // SAFETY: `path` is NUL-terminated and outlives this synchronous call, the
+    // verb is a static wide literal, and every remaining argument is the
+    // documented null. egui runs this on the window thread, where winit has
+    // already initialized COM for the shell extensions Explorer loads.
+    let instance = unsafe {
+        ShellExecuteW(
+            None,
+            windows::core::w!("open"),
+            PCWSTR(path.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if instance.0.addr() <= SHELL_EXECUTE_MIN_SUCCESS {
+        return Err(CoreError::Validation(format!(
+            "the shell refused to open the folder (code {})",
+            instance.0.addr()
+        )));
+    }
+    Ok(())
 }
 
 pub struct WindowsDllInspector;
