@@ -2,7 +2,7 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
-## Unreleased
+## 1.1.3
 
 - Ship `dlss-updater-<version>-windows-x86_64.zip`, which holds a folder of the same name with
   `dlss-updater.exe`, `README.md`, and `LICENSE` in it, beside a `SHA256SUMS` file. The
