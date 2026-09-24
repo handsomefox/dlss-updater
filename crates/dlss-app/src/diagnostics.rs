@@ -68,6 +68,12 @@ pub(crate) fn reveal(directory: &std::path::Path) {
         tracing::warn!(path = %directory.display(), %error, "could not create folder before opening it");
         return;
     }
+    open_existing(directory);
+}
+
+/// Opens a folder that belongs to someone else, such as a game's install
+/// folder, in the system file manager. Unlike [`reveal`], never creates it.
+pub(crate) fn open_existing(directory: &std::path::Path) {
     #[cfg(windows)]
     if let Err(error) = dlss_platform::windows::open_folder(directory) {
         tracing::warn!(path = %directory.display(), %error, "could not open folder");

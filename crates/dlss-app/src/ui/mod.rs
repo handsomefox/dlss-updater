@@ -1,9 +1,12 @@
 pub(crate) mod detail;
+pub(crate) mod footer;
 pub(crate) mod inspector;
 pub(crate) mod library;
 pub(crate) mod review;
+pub(crate) mod sources;
 pub(crate) mod table;
 pub(crate) mod theme;
+pub(crate) mod toast;
 pub(crate) mod toolbar;
 pub(crate) mod widgets;
 pub(crate) mod windows;

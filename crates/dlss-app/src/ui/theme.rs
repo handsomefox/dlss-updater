@@ -22,9 +22,13 @@ pub(crate) const STROKE: egui::Color32 = egui::Color32::from_rgb(0x2A, 0x33, 0x4
 
 pub(crate) const TEXT: egui::Color32 = egui::Color32::from_rgb(0xE2, 0xE8, 0xF0);
 pub(crate) const TEXT_MUTED: egui::Color32 = egui::Color32::from_rgb(0x93, 0xA1, 0xB0);
+/// Dimmer than [`TEXT_MUTED`], for placeholders like the dash in an empty cell.
+pub(crate) const TEXT_FAINT: egui::Color32 = egui::Color32::from_rgb(0x5C, 0x68, 0x76);
 
 /// NVIDIA green; doubles as the success color so the palette stays cohesive.
 pub(crate) const ACCENT: egui::Color32 = egui::Color32::from_rgb(0x76, 0xB9, 0x00);
+/// [`ACCENT`] lifted for hovered accent-filled controls.
+pub(crate) const ACCENT_HOVER: egui::Color32 = egui::Color32::from_rgb(0x88, 0xCC, 0x14);
 /// High-contrast foreground for controls filled with [`ACCENT`].
 pub(crate) const TEXT_ON_ACCENT: egui::Color32 = egui::Color32::from_rgb(0x0E, 0x11, 0x16);
 pub(crate) const SUCCESS: egui::Color32 = ACCENT;
@@ -86,7 +90,8 @@ fn visuals(visuals: &mut egui::Visuals) {
     visuals.warn_fg_color = WARNING;
     visuals.error_fg_color = DANGER;
     visuals.hyperlink_color = egui::Color32::from_rgb(0x9A, 0xD1, 0x3D);
-    visuals.selection.bg_fill = ACCENT.gamma_multiply(0.35);
+    // Also the highlight of selected table rows, so keep it a quiet tint.
+    visuals.selection.bg_fill = ACCENT.gamma_multiply(0.22);
     visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT);
 
     let widgets = &mut visuals.widgets;
@@ -165,7 +170,8 @@ fn font_definitions() -> egui::FontDefinitions {
 /// Glyphs from the vendored Phosphor icon font (regular variant).
 ///
 /// Codepoints must match `assets/fonts/Phosphor.ttf`; they are copied from
-/// the `egui-phosphor` 0.12 generated tables for that exact font file.
+/// the `egui-phosphor` 0.12 generated tables for that exact font file. The
+/// font names its glyphs `uniXXXX`, so check a new codepoint by rendering it.
 pub(crate) mod icons {
     pub(crate) const ARROW_CIRCLE_UP: &str = "\u{E030}";
     pub(crate) const ARROW_CLOCKWISE: &str = "\u{E036}";
@@ -175,14 +181,19 @@ pub(crate) mod icons {
     pub(crate) const ARROW_U_UP_LEFT: &str = "\u{E08A}";
     pub(crate) const CARET_DOWN: &str = "\u{E136}";
     pub(crate) const CARET_UP: &str = "\u{E13C}";
+    pub(crate) const CHECK: &str = "\u{E182}";
     pub(crate) const CHECK_CIRCLE: &str = "\u{E184}";
     pub(crate) const CIRCLE: &str = "\u{E18A}";
+    pub(crate) const CLOCK: &str = "\u{E19A}";
     pub(crate) const CLOCK_COUNTER_CLOCKWISE: &str = "\u{E1A0}";
     pub(crate) const DOWNLOAD_SIMPLE: &str = "\u{E20C}";
     pub(crate) const EYE: &str = "\u{E220}";
+    pub(crate) const FOLDER_MINUS: &str = "\u{E25C}";
+    pub(crate) const FOLDER_OPEN: &str = "\u{E256}";
     pub(crate) const FOLDER_PLUS: &str = "\u{E258}";
     pub(crate) const FOLDER_SIMPLE: &str = "\u{E25A}";
     pub(crate) const GAME_CONTROLLER: &str = "\u{E26E}";
+    pub(crate) const HOURGLASS: &str = "\u{E2B2}";
     pub(crate) const INFO: &str = "\u{E2CE}";
     pub(crate) const LIGHTNING: &str = "\u{E2DE}";
     pub(crate) const LIST_CHECKS: &str = "\u{EADC}";

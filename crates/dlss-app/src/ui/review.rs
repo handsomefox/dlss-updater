@@ -3,7 +3,8 @@
 //! worker re-validates end to end via `plan_target_profile`.
 
 use super::theme::{self, icons};
-use super::widgets;
+use super::toast::plural;
+use super::widgets::{self, TriState};
 use crate::ui::detail::dll_kind_icon;
 use crate::{Command, DlssApp};
 use eframe::egui;
@@ -195,9 +196,14 @@ impl DlssApp {
         // renders from it, both within one frame, so the button label and its
         // enabled state never lag a checkbox click.
         let checked = std::cell::Cell::new(0_usize);
+        let title = match review.intent {
+            ReviewIntent::QuickDlss(_) => "Review DLSS updates",
+            ReviewIntent::AllDlls(_) => "Review DLL updates",
+            ReviewIntent::Profiles(_) => "Review staged changes",
+        };
         widgets::modal_with_actions(
             ctx,
-            widgets::dialog("review", icons::LIST_CHECKS, "Review changes", 600.0),
+            widgets::dialog("review", icons::LIST_CHECKS, title, 640.0),
             &mut keep_open,
             |ui| {
                 review_warnings(ui, &review);
@@ -210,11 +216,6 @@ impl DlssApp {
                 for error in &review.errors {
                     widgets::banner(ui, theme::DANGER, icons::WARNING_CIRCLE, error, false);
                 }
-                ui.add_space(4.0);
-                ui.weak(
-                    "If Windows denies access to a target, the app will request elevation \
-                     only for the denied replacements.",
-                );
                 checked.set(review.rows.iter().filter(|row| row.checked).count());
             },
             // Pinned below the scrolling list: with many staged changes the
@@ -223,14 +224,28 @@ impl DlssApp {
                 let checked = checked.get();
                 ui.add_space(8.0);
                 ui.separator();
-                ui.horizontal(|ui| {
-                    let label = if checked == 1 {
-                        "Apply 1 change".to_owned()
+                ui.label(
+                    egui::RichText::new(
+                        "Each DLL is backed up, replaced, and checked again. \
+                         Windows asks for permission only if a folder needs it.",
+                    )
+                    .color(theme::TEXT_MUTED)
+                    .size(12.0),
+                );
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let label = format!("Apply {}", plural(checked, "change"));
+                    // A faded accent button reads as broken rather than
+                    // disabled, so an empty selection gets a plain one.
+                    let button = if checked > 0 {
+                        widgets::primary_icon_button(icons::CHECK, &label)
                     } else {
-                        format!("Apply {checked} changes")
+                        egui::Button::new(widgets::icon_text(icons::CHECK, &label))
                     };
-                    let primary = widgets::primary_button(label);
-                    apply = ui.add_enabled(checked > 0, primary).clicked();
+                    apply = ui
+                        .add_enabled(checked > 0, button)
+                        .on_disabled_hover_text("Select at least one change")
+                        .clicked();
                     if ui.button("Cancel").clicked() {
                         cancel = true;
                     }
@@ -253,9 +268,13 @@ impl DlssApp {
     fn review_download_state(&mut self, ui: &mut egui::Ui) {
         widgets::section_heading(ui, icons::DOWNLOAD_SIMPLE, "Download required");
         ui.label(
-            "The latest official release must be downloaded and validated before \
-             the changes can be previewed.",
+            egui::RichText::new(
+                "The changes are listed once the latest official release is downloaded \
+                 and its signatures are checked.",
+            )
+            .color(theme::TEXT_MUTED),
         );
+        ui.add_space(6.0);
         let Some(release) = self.latest_release_meta().cloned() else {
             widgets::banner(
                 ui,
@@ -271,38 +290,12 @@ impl DlssApp {
         }
         let busy = self.inspecting_release.is_some();
         if busy {
-            let fraction = self
-                .release_progress
-                .as_ref()
-                .filter(|(id, _, _)| *id == release.metadata.id)
-                .and_then(|(_, received, total)| {
-                    let total = (*total)?;
-                    #[expect(
-                        clippy::cast_precision_loss,
-                        reason = "progress display only needs coarse precision"
-                    )]
-                    (total > 0).then(|| *received as f32 / total as f32)
-                });
-            match fraction {
-                Some(fraction) => {
-                    ui.add(
-                        egui::ProgressBar::new(fraction)
-                            .desired_width(ui.available_width())
-                            .show_percentage(),
-                    );
-                }
-                None => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Validating official DLLs…");
-                    });
-                }
-            }
+            let (state, received, total) = self.release_progress_now();
+            ui.horizontal(|ui| widgets::download_progress(ui, state, received, total));
         } else if ui
-            .button(format!(
-                "{} Download and validate {}",
+            .add(widgets::primary_icon_button(
                 icons::DOWNLOAD_SIMPLE,
-                release.metadata.tag
+                &format!("Download {}", release.metadata.tag),
             ))
             .clicked()
         {
@@ -326,6 +319,7 @@ impl DlssApp {
                 .targets
                 .insert(row.dll_id.clone(), row.desired.clone());
         }
+        let per_game_ids: Vec<_> = per_game.keys().cloned().collect();
         for (game_id, profile) in per_game {
             self.profiles_applying
                 .insert(game_id.clone(), profile.targets.keys().cloned().collect());
@@ -334,7 +328,8 @@ impl DlssApp {
                 .commands
                 .send(Command::ApplyProfile(game_id, profile));
         }
-        self.toast = Some("Operation queued…".into());
+        let games: Vec<_> = per_game_ids;
+        self.start_batch(crate::BatchKind::Update, &games);
     }
 }
 
@@ -343,10 +338,12 @@ fn review_warnings(ui: &mut egui::Ui, review: &ReviewState) {
         ui,
         theme::WARNING,
         icons::WARNING,
-        "Anti-cheat may treat DLL swaps as tampering.",
+        "Anti-cheat may treat a replaced DLL as tampering. Avoid this for online games \
+         with anti-cheat.",
         false,
     );
     for risk_name in checked_risk_games(&review.rows) {
+        ui.add_space(4.0);
         widgets::banner(
             ui,
             theme::WARNING,
@@ -355,22 +352,31 @@ fn review_warnings(ui: &mut egui::Ui, review: &ReviewState) {
             false,
         );
     }
-    if matches!(review.intent, ReviewIntent::QuickDlss(_)) {
-        ui.weak("Streamline and Reflex DLLs are never touched by Quick update.");
-    } else if review
+    if review
         .rows
         .iter()
         .any(|row| row.checked && row.is_streamline())
     {
+        ui.add_space(4.0);
         widgets::banner(
             ui,
             theme::DANGER,
             icons::WARNING,
-            "Streamline replacements can reduce performance or crash games.",
+            "Replacing Streamline can make a game run worse or crash. Leave it unchecked \
+             unless you are fixing a specific problem.",
             false,
         );
     }
-    ui.weak("Each DLL is re-inspected, backed up, replaced independently, and verified.");
+    if matches!(review.intent, ReviewIntent::QuickDlss(_)) {
+        ui.label(
+            egui::RichText::new(
+                "DLSS updates never touch Streamline or Reflex. \
+                 Use Update all DLLs on a game for those.",
+            )
+            .color(theme::TEXT_MUTED)
+            .size(12.0),
+        );
+    }
 }
 
 fn checked_risk_games(rows: &[ReviewRow]) -> std::collections::BTreeSet<&'static str> {
@@ -383,53 +389,119 @@ fn checked_risk_games(rows: &[ReviewRow]) -> std::collections::BTreeSet<&'static
 fn review_row_list(ui: &mut egui::Ui, review: &mut ReviewState) {
     if review.rows.is_empty() {
         if review.errors.is_empty() {
-            widgets::chip(
-                ui,
-                icons::CHECK_CIRCLE,
-                "Everything is already up to date.",
-                theme::SUCCESS,
-            );
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                ui.label(widgets::icon(icons::CHECK_CIRCLE, 36.0, theme::SUCCESS));
+                ui.add_space(4.0);
+                ui.heading("Nothing to update");
+                ui.label(
+                    egui::RichText::new("Every DLL here already matches the latest release.")
+                        .color(theme::TEXT_MUTED),
+                );
+            });
+            ui.add_space(12.0);
         }
         return;
     }
-    let many_games = {
-        let first = &review.rows[0].game_id;
-        review.rows.iter().any(|row| &row.game_id != first)
-    };
-    egui::ScrollArea::vertical()
-        .max_height(320.0)
-        .show(ui, |ui| {
-            let mut previous_game: Option<dlss_core::GameId> = None;
-            // Rows arrive grouped per game, so a plain run-length header works.
-            for row in &mut review.rows {
-                if many_games && previous_game.as_ref() != Some(&row.game_id) {
-                    ui.add_space(4.0);
-                    ui.strong(&row.game_name);
+    let games = group_by_game(&review.rows);
+    let checked = review.rows.iter().filter(|row| row.checked).count();
+    let all = TriState::of(checked, review.rows.len());
+    if review.rows.len() > 1
+        && widgets::tri_checkbox(
+            ui,
+            all,
+            format!(
+                "{} across {}",
+                plural(review.rows.len(), "change"),
+                plural(games.len(), "game")
+            ),
+            "Select or clear every change",
+        )
+    {
+        let select = all != TriState::All;
+        for row in &mut review.rows {
+            row.checked = select;
+        }
+    }
+    ui.add_space(4.0);
+    for range in games {
+        widgets::card(ui, |ui| {
+            let rows = &mut review.rows[range];
+            let checked = rows.iter().filter(|row| row.checked).count();
+            let state = TriState::of(checked, rows.len());
+            let name = egui::RichText::new(&rows[0].game_name).strong();
+            if widgets::tri_checkbox(ui, state, name, "Select or clear this game's changes") {
+                let select = state != TriState::All;
+                for row in rows.iter_mut() {
+                    row.checked = select;
                 }
-                previous_game = Some(row.game_id.clone());
-                review_row(ui, row);
             }
+            ui.indent("review_rows", |ui| {
+                for row in rows.iter_mut() {
+                    review_row(ui, row);
+                }
+            });
         });
+        ui.add_space(6.0);
+    }
+}
+
+/// Consecutive rows that belong to one game. Rows are built game by game,
+/// so each game is one run.
+fn group_by_game(rows: &[ReviewRow]) -> Vec<std::ops::Range<usize>> {
+    let mut groups: Vec<std::ops::Range<usize>> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        match groups.last_mut() {
+            Some(group) if rows[group.start].game_id == row.game_id => group.end = index + 1,
+            _ => groups.push(index..index + 1),
+        }
+    }
+    groups
 }
 
 fn review_row(ui: &mut egui::Ui, row: &mut ReviewRow) {
     ui.horizontal(|ui| {
-        ui.checkbox(&mut row.checked, "");
         let kind = dlss_core::DllKind::classify(&row.file_name);
-        ui.label(widgets::icon(dll_kind_icon(kind), 15.0, theme::ACCENT));
-        ui.label(dlss_core::friendly_dll_label(&row.file_name));
-        ui.monospace(format!(
-            "{} {} {}",
-            version_text(row.installed),
-            icons::ARROW_RIGHT,
-            version_text(row.target),
-        ));
-        if row.comparison == dlss_core::Comparison::Downgrade {
-            widgets::chip(ui, icons::CARET_DOWN, "Downgrade", theme::WARNING);
-        }
-        if row.is_streamline() {
-            widgets::chip(ui, icons::WARNING, "Streamline", theme::WARNING);
-        }
+        let mut label = egui::text::LayoutJob::default();
+        label.append(
+            dll_kind_icon(kind),
+            0.0,
+            egui::TextFormat {
+                font_id: theme::icon_font(15.0),
+                color: theme::ACCENT,
+                ..Default::default()
+            },
+        );
+        label.append(
+            &dlss_core::friendly_dll_label(&row.file_name),
+            6.0,
+            egui::TextFormat {
+                font_id: egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                color: egui::Color32::PLACEHOLDER,
+                ..Default::default()
+            },
+        );
+        widgets::checkbox(ui, &mut row.checked, label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.label(
+                egui::RichText::new(version_text(row.target))
+                    .monospace()
+                    .color(theme::ACCENT),
+            );
+            ui.label(widgets::icon(icons::ARROW_RIGHT, 12.0, theme::TEXT_MUTED));
+            ui.label(
+                egui::RichText::new(version_text(row.installed))
+                    .monospace()
+                    .color(theme::TEXT_MUTED),
+            );
+            if row.comparison == dlss_core::Comparison::Downgrade {
+                widgets::chip(ui, icons::CARET_DOWN, "Older", theme::WARNING)
+                    .on_hover_text("The chosen version is older than the installed one");
+            }
+            if row.is_streamline() {
+                widgets::chip(ui, icons::WARNING, "Streamline", theme::WARNING);
+            }
+        });
     });
 }
 
@@ -474,6 +546,19 @@ mod tests {
             checked,
             known_risk: risk,
         }
+    }
+
+    #[test]
+    fn rows_group_into_one_run_per_game() {
+        let rows = [
+            risk_row("a", None, true),
+            risk_row("a", None, true),
+            risk_row("b", None, false),
+            risk_row("c", None, true),
+            risk_row("c", None, true),
+        ];
+        assert_eq!(group_by_game(&rows), [0..2, 2..3, 3..5]);
+        assert!(group_by_game(&[]).is_empty());
     }
 
     #[test]

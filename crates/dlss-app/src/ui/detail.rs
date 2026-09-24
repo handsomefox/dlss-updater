@@ -1,12 +1,12 @@
 //! Game detail view: header with primary actions, per-DLL cards grouped by
 //! kind, and the staged-changes ribbon.
 
-use super::inspector::desired_label;
+use super::inspector::{comparison_label, desired_label, signature_label};
 use super::theme::{self, icons};
 use super::widgets;
 use super::windows::format_timestamp;
 use crate::ui::review::ReviewIntent;
-use crate::{Command, DlssApp, View};
+use crate::{DlssApp, View};
 use eframe::egui;
 
 pub(crate) fn dll_kind_rank(file_name: &std::ffi::OsStr) -> u8 {
@@ -62,204 +62,265 @@ impl DlssApp {
         };
         let mut requested_review = None;
         let mut go_back = false;
-        let mut undo = false;
-        self.detail_header(ui, index, &mut go_back, &mut undo, &mut requested_review);
-        ui.add_space(6.0);
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            self.detail_dll_cards(ui, index);
-        });
+        self.detail_header(ui, index, &mut go_back, &mut requested_review);
+        self.dll_table(ui, index);
         if go_back {
             self.view = View::Library;
-        }
-        if undo {
-            let game_id = game_id.clone();
-            self.undo_game = None;
-            self.toast = Some("Restoring backed-up DLLs…".into());
-            let _ = self.worker.commands.send(Command::UndoLast(game_id));
         }
         if let Some(intent) = requested_review {
             self.open_review(intent);
         }
     }
 
+    /// The page title: back link, game name, where it lives, and the two
+    /// update actions, closed off from the DLL table by a rule.
     fn detail_header(
-        &mut self,
+        &self,
         ui: &mut egui::Ui,
         index: usize,
         go_back: &mut bool,
-        undo: &mut bool,
+        requested_review: &mut Option<ReviewIntent>,
+    ) {
+        let game = &self.games[index];
+        if ui
+            .add(
+                egui::Button::new(widgets::colored_icon_label(
+                    icons::ARROW_LEFT,
+                    "Library",
+                    theme::TEXT_MUTED,
+                    13.0,
+                ))
+                .frame(false),
+            )
+            .on_hover_text("Back to the library (Esc)")
+            .clicked()
+        {
+            *go_back = true;
+        }
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(&game.name).font(egui::FontId::new(
+                        24.0,
+                        egui::FontFamily::Name("semibold".into()),
+                    )));
+                    widgets::badge(ui, game.store, theme::INFO);
+                    if let Some(risk_name) = game.known_risk {
+                        widgets::chip(ui, icons::WARNING, "Known risk", theme::WARNING)
+                            .on_hover_text(format!(
+                                "{risk_name}: {}",
+                                dlss_core::KNOWN_GAME_RISK_WARNING
+                            ));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    let path = game.root.display().to_string();
+                    ui.scope(|ui| {
+                        ui.set_max_width((ui.available_width() - 420.0).max(200.0));
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(&path)
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(theme::TEXT_MUTED),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(&path);
+                    });
+                    if ui
+                        .add(
+                            egui::Button::new(widgets::colored_icon_label(
+                                icons::FOLDER_OPEN,
+                                "Open",
+                                theme::TEXT_MUTED,
+                                12.5,
+                            ))
+                            .frame(false),
+                        )
+                        .on_hover_text("Open in File Explorer")
+                        .clicked()
+                    {
+                        crate::diagnostics::open_existing(&game.root);
+                    }
+                    let mut facts = vec![super::toast::plural(game.dlls, "NVIDIA DLL")];
+                    if game.upgrades > 0 {
+                        facts.push(super::toast::plural(game.upgrades, "update"));
+                    }
+                    if let Some(operation) = &game.last_operation {
+                        facts.push(operation.clone());
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("· {}", facts.join(" · ")))
+                            .size(12.5)
+                            .color(theme::TEXT_MUTED),
+                    );
+                });
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.detail_actions(ui, index, requested_review);
+            });
+        });
+        ui.add_space(10.0);
+        let rule = ui.available_rect_before_wrap();
+        ui.painter().hline(
+            rule.x_range(),
+            rule.top(),
+            egui::Stroke::new(1.0, theme::STROKE),
+        );
+        ui.add_space(8.0);
+    }
+
+    /// Update buttons at the right of the game header, or a spinner while
+    /// this game is being changed.
+    fn detail_actions(
+        &self,
+        ui: &mut egui::Ui,
+        index: usize,
         requested_review: &mut Option<ReviewIntent>,
     ) {
         let game = &self.games[index];
         let in_flight = self.upgrading.as_ref() == Some(&game.id)
             || self.profiles_applying.contains_key(&game.id);
-        let can_update = self.catalog_release.is_some()
-            && game.dlls > 0
-            && self.upgrading.is_none()
-            && !in_flight;
-        let can_undo = self.undo_game.as_ref() == Some(&game.id);
-        widgets::card(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui
-                    .button(widgets::icon_text(icons::ARROW_LEFT, "Library"))
-                    .clicked()
-                {
-                    *go_back = true;
-                }
-                ui.heading(&game.name);
-                widgets::badge(ui, game.store, theme::INFO);
-                if game.known_risk.is_some() {
-                    widgets::chip(ui, icons::WARNING, "Known risk", theme::WARNING);
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if in_flight {
-                        ui.spinner();
-                        ui.label("Updating…");
-                        return;
-                    }
-                    let primary = widgets::primary_button("Update DLSS");
-                    if ui
-                        .add_enabled(can_update, primary)
-                        .on_hover_text("Review and update this game's DLSS DLLs")
-                        .clicked()
-                    {
-                        *requested_review = Some(ReviewIntent::QuickDlss(vec![game.id.clone()]));
-                    }
-                    if ui
-                        .add_enabled(
-                            can_update,
-                            egui::Button::new(widgets::icon_text(icons::STACK, "All DLLs")),
-                        )
-                        .on_hover_text(
-                            "Review updates for every managed DLL, including Streamline and Reflex",
-                        )
-                        .clicked()
-                    {
-                        *requested_review = Some(ReviewIntent::AllDlls(vec![game.id.clone()]));
-                    }
-                    if can_undo
-                        && ui
-                            .button(widgets::icon_text(
-                                icons::ARROW_U_UP_LEFT,
-                                "Undo last change",
-                            ))
-                            .clicked()
-                    {
-                        *undo = true;
-                    }
-                });
-            });
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::Label::new(
-                        egui::RichText::new(game.root.display().to_string())
-                            .monospace()
-                            .size(11.5)
-                            .color(theme::TEXT_MUTED),
-                    )
-                    .selectable(true),
-                );
-            });
-            if let Some(risk_name) = game.known_risk {
-                widgets::banner(
-                    ui,
-                    theme::WARNING,
-                    icons::WARNING,
-                    &format!("{risk_name}: {}", dlss_core::KNOWN_GAME_RISK_WARNING),
-                    false,
-                );
-            }
-            ui.horizontal(|ui| {
-                ui.weak(format!("{} managed DLLs", game.dlls));
-                if game.last_operation != "Never" {
-                    ui.weak("·");
-                    ui.weak(&game.last_operation);
-                }
-            });
-        });
+        let can_update = self.catalog_release.is_some() && game.dlls > 0 && !self.busy();
+        if in_flight {
+            ui.label("Updating…");
+            ui.spinner();
+            return;
+        }
+        let reason = if self.busy() {
+            "Wait for the current update to finish"
+        } else if game.dlls == 0 {
+            "This game has no NVIDIA DLLs"
+        } else {
+            "The release catalog has not loaded yet"
+        };
+        if ui
+            .add_enabled(
+                can_update,
+                widgets::primary_icon_button(icons::SPARKLE, "Update DLSS"),
+            )
+            .on_hover_text("Review DLSS updates for this game")
+            .on_disabled_hover_text(reason)
+            .clicked()
+        {
+            *requested_review = Some(ReviewIntent::QuickDlss(vec![game.id.clone()]));
+        }
+        if ui
+            .add_enabled(
+                can_update,
+                egui::Button::new(widgets::icon_text(icons::STACK, "Update all DLLs")),
+            )
+            .on_hover_text("Review updates for every NVIDIA DLL, including Streamline and Reflex")
+            .on_disabled_hover_text(reason)
+            .clicked()
+        {
+            *requested_review = Some(ReviewIntent::AllDlls(vec![game.id.clone()]));
+        }
     }
 
-    fn detail_dll_cards(&mut self, ui: &mut egui::Ui, index: usize) {
+    /// Every NVIDIA DLL in the game, one row each, grouped by kind through
+    /// their order and icon rather than repeated headings.
+    fn dll_table(&mut self, ui: &mut egui::Ui, index: usize) {
         let mut details = self.games[index].details.clone();
-        details.sort_by_key(|dll| dll_kind_rank(&dll.file_name));
+        details.sort_by_key(|dll| (dll_kind_rank(&dll.file_name), dll.file_name.clone()));
         if details.is_empty() {
-            ui.add_space(24.0);
+            ui.add_space(40.0);
             ui.vertical_centered(|ui| {
-                ui.weak("No managed DLLs were found in this game's folder.");
+                ui.label(widgets::icon(icons::PACKAGE, 40.0, theme::TEXT_FAINT));
+                ui.add_space(6.0);
+                ui.heading("No NVIDIA DLLs in this game");
+                ui.label(
+                    egui::RichText::new(
+                        "The folder has no DLSS, Streamline, or Reflex DLLs, so there is \
+                         nothing to update.",
+                    )
+                    .color(theme::TEXT_MUTED),
+                );
             });
             return;
         }
         let latest = self.latest_catalog();
-        let mut previous_kind = None;
-        for dll in &details {
-            let kind = dlss_core::DllKind::classify(&dll.file_name);
-            if kind != previous_kind || previous_kind.is_none() {
-                ui.add_space(6.0);
-                widgets::section_heading(ui, dll_kind_icon(kind), dll_kind_heading(kind));
-                previous_kind = kind;
-            }
-            self.dll_card(ui, dll, &latest);
-            ui.add_space(4.0);
-        }
-    }
-
-    fn dll_card(
-        &mut self,
-        ui: &mut egui::Ui,
-        dll: &dlss_core::DllInstallation,
-        latest: &[dlss_core::CatalogDll],
-    ) {
-        widgets::card(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.strong(dlss_core::friendly_dll_label(&dll.file_name));
-                ui.weak(egui::RichText::new(dll.file_name.to_string_lossy()).size(11.5));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let comparison = latest
+        egui_extras::TableBuilder::new(ui)
+            .id_salt("dll_table")
+            .striped(true)
+            .resizable(false)
+            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+            .column(egui_extras::Column::remainder().at_least(200.0).clip(true))
+            .column(egui_extras::Column::exact(170.0).clip(true))
+            .column(egui_extras::Column::exact(100.0))
+            .column(egui_extras::Column::exact(100.0))
+            .column(egui_extras::Column::exact(170.0))
+            .column(egui_extras::Column::exact(30.0))
+            .column(egui_extras::Column::exact(262.0))
+            .header(30.0, |mut header| {
+                for title in [
+                    "DLL",
+                    "File",
+                    "Installed",
+                    "Latest",
+                    "Status",
+                    "",
+                    "Version",
+                ] {
+                    header.col(|ui| {
+                        widgets::table_header_background(ui);
+                        ui.label(widgets::table_header_text(title));
+                    });
+                }
+            })
+            .body(|body| {
+                body.rows(36.0, details.len(), |mut row| {
+                    let dll = &details[row.index()];
+                    let staged = self
+                        .persisted
+                        .target_profile
+                        .targets
+                        .get(&dll.id)
+                        .is_some_and(|target| *target != dlss_core::DesiredDll::KeepInstalled);
+                    row.set_selected(staged);
+                    let target = latest
                         .iter()
                         .filter(|candidate| {
                             dlss_core::same_file_name(&candidate.file_name, &dll.file_name)
                         })
-                        .max_by_key(|candidate| (candidate.version, candidate.sha256))
-                        .map_or(dlss_core::Comparison::Unavailable, |target| {
-                            dlss_core::compare_dll(Some(&dll.metadata), Some(target))
-                        });
-                    widgets::status_chip(ui, comparison);
-                    widgets::signature_chip(ui, dll.metadata.signature);
+                        .max_by_key(|candidate| (candidate.version, candidate.sha256));
+                    let comparison = target.map_or(dlss_core::Comparison::Unavailable, |target| {
+                        dlss_core::compare_dll(Some(&dll.metadata), Some(target))
+                    });
+                    row.col(|ui| {
+                        let kind = dlss_core::DllKind::classify(&dll.file_name);
+                        ui.label(widgets::icon(dll_kind_icon(kind), 15.0, theme::ACCENT))
+                            .on_hover_text(dll_kind_heading(kind));
+                        ui.label(dlss_core::friendly_dll_label(&dll.file_name));
+                    });
+                    row.col(|ui| {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(dll.file_name.to_string_lossy())
+                                    .monospace()
+                                    .size(12.0)
+                                    .color(theme::TEXT_MUTED),
+                            )
+                            .truncate(),
+                        )
+                        .on_hover_text(dll.path.display().to_string());
+                    });
+                    row.col(|ui| version_cell(ui, dll.metadata.version, theme::TEXT));
+                    row.col(|ui| {
+                        let color = if comparison == dlss_core::Comparison::Upgrade {
+                            theme::ACCENT
+                        } else {
+                            theme::TEXT_MUTED
+                        };
+                        version_cell(ui, target.map(|target| target.version), color);
+                    });
+                    row.col(|ui| comparison_cell(ui, comparison));
+                    row.col(|ui| signature_cell(ui, dll.metadata.signature));
+                    row.col(|ui| self.desired_target_combo(ui, dll));
                 });
             });
-            ui.add(
-                egui::Label::new(
-                    egui::RichText::new(dll.path.display().to_string())
-                        .monospace()
-                        .size(11.5)
-                        .color(theme::TEXT_MUTED),
-                )
-                .selectable(true),
-            );
-            ui.horizontal(|ui| {
-                ui.label("Version:");
-                self.desired_target_combo(ui, dll);
-                if let Some(backup) = self
-                    .backups
-                    .iter()
-                    .filter(|backup| backup.original_path == dll.path)
-                    .max_by_key(|backup| backup.created_unix)
-                    .cloned()
-                    && ui
-                        .button(widgets::icon_text(icons::ARROW_U_UP_LEFT, "Undo this DLL"))
-                        .on_hover_text("Stage this DLL's most recent backup for restore")
-                        .clicked()
-                {
-                    self.persisted.target_profile.targets.insert(
-                        dll.id.clone(),
-                        dlss_core::DesiredDll::Restore {
-                            backup_sha256: backup.sha256,
-                        },
-                    );
-                }
-            });
-            ui.weak("Choose a version for this DLL. The change is staged until Review & apply.");
-        });
     }
 
     #[expect(
@@ -313,7 +374,7 @@ impl DlssApp {
                         backup_sha256: backup.sha256,
                     },
                     format!(
-                        "Restore {} · {}",
+                        "Restore backup {} · {}",
                         backup
                             .version
                             .map_or_else(|| "Unknown".into(), |version| version.to_string()),
@@ -335,8 +396,8 @@ impl DlssApp {
                 .unwrap_or(dlss_core::DesiredDll::KeepInstalled);
             let before = desired.clone();
             let installed_label = dll.metadata.version.map_or_else(
-                || "Installed · version unknown".into(),
-                |version| format!("{version} · Installed"),
+                || "Keep installed".into(),
+                |version| format!("Keep installed ({version})"),
             );
             let selected_label = match &desired {
                 dlss_core::DesiredDll::KeepInstalled => installed_label.clone(),
@@ -361,7 +422,7 @@ impl DlssApp {
                     ),
             };
             egui::ComboBox::from_id_salt(("desired", &dll.id.0))
-                .width(260.0)
+                .width(250.0)
                 .selected_text(selected_label)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
@@ -393,25 +454,45 @@ impl DlssApp {
             }
         });
     }
+}
 
-    /// Bottom bar shown while this game has staged advanced targets.
-    pub(crate) fn staged_ribbon(&mut self, ui: &mut egui::Ui, game_id: &dlss_core::GameId) {
-        let staged = self.staged_targets_for(game_id);
-        ui.horizontal(|ui| {
-            ui.label(widgets::icon(icons::LIST_CHECKS, 15.0, theme::ACCENT));
-            ui.strong(format!(
-                "{staged} staged DLL {}",
-                if staged == 1 { "change" } else { "changes" }
-            ));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let primary = widgets::primary_button("Review & apply");
-                if ui.add(primary).clicked() {
-                    self.open_review(ReviewIntent::Profiles(vec![game_id.clone()]));
-                }
-                if ui.button("Discard").clicked() {
-                    self.clear_game_profile(game_id);
-                }
-            });
-        });
+fn version_cell(ui: &mut egui::Ui, version: Option<dlss_core::DllVersion>, color: egui::Color32) {
+    match version {
+        Some(version) => {
+            ui.label(
+                egui::RichText::new(version.to_string())
+                    .monospace()
+                    .color(color),
+            );
+        }
+        None => widgets::empty_cell(ui),
     }
+}
+
+/// The comparison against the latest release, as colored text rather than a
+/// pill, so a column of them stays quiet.
+fn comparison_cell(ui: &mut egui::Ui, comparison: dlss_core::Comparison) {
+    let (icon, color) = match comparison {
+        dlss_core::Comparison::Upgrade => (icons::ARROW_CIRCLE_UP, theme::ACCENT),
+        dlss_core::Comparison::Identical => (icons::CHECK, theme::SUCCESS),
+        dlss_core::Comparison::Downgrade | dlss_core::Comparison::DifferentBuild => {
+            (icons::STACK, theme::TEXT_MUTED)
+        }
+        dlss_core::Comparison::Unknown => (icons::QUESTION, theme::WARNING),
+        dlss_core::Comparison::Unavailable => (icons::MINUS, theme::TEXT_FAINT),
+    };
+    widgets::status_text(ui, icon, comparison_label(comparison), color);
+}
+
+/// A trusted signature is the normal case and gets a quiet icon; anything
+/// else is colored. The hover names the state either way.
+fn signature_cell(ui: &mut egui::Ui, status: dlss_core::SignatureStatus) {
+    let (icon, color) = match status {
+        dlss_core::SignatureStatus::Trusted => (icons::SHIELD_CHECK, theme::TEXT_MUTED),
+        dlss_core::SignatureStatus::Untrusted => (icons::SHIELD_WARNING, theme::DANGER),
+        dlss_core::SignatureStatus::Unsigned => (icons::SHIELD_SLASH, theme::WARNING),
+        dlss_core::SignatureStatus::Unavailable => (icons::QUESTION, theme::TEXT_FAINT),
+    };
+    ui.label(widgets::icon(icon, 15.0, color))
+        .on_hover_text(signature_label(status));
 }

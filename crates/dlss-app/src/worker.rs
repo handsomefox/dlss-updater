@@ -38,6 +38,8 @@ pub(crate) enum Command {
     ApplyProfile(GameId, TargetProfile),
     UndoLast(GameId),
     AddRoot(PathBuf),
+    /// Stop scanning a folder the user added, then rescan.
+    RemoveRoot(PathBuf),
     ImportDll(PathBuf),
     RemoveImport([u8; 32]),
     #[cfg(windows)]
@@ -218,6 +220,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::ApplyProfile(_, _) => "apply_profile",
         Command::UndoLast(_) => "undo_last",
         Command::AddRoot(_) => "add_root",
+        Command::RemoveRoot(_) => "remove_root",
         Command::ImportDll(_) => "import_dll",
         Command::RemoveImport(_) => "remove_import",
         #[cfg(windows)]
@@ -241,6 +244,10 @@ fn dispatch(command: Command, events: &EventSink, state: &mut WorkerState) -> bo
         Command::ApplyProfile(id, profile) => profile_command(id, &profile, events, state),
         Command::UndoLast(id) => undo_command(id, events, state),
         Command::AddRoot(root) => add_root_command(&root, events, state),
+        Command::RemoveRoot(root) => {
+            remove_root(&mut state.roots, &root);
+            scan(events, &state.roots, &mut state.games);
+        }
         Command::ImportDll(path) => import_command(&path, events, state),
         Command::RemoveImport(hash) => remove_import_command(hash, events, state),
         #[cfg(windows)]
@@ -504,6 +511,13 @@ fn add_root_command(root: &std::path::Path, events: &EventSink, state: &mut Work
         ))),
     }
     scan(events, &state.roots, &mut state.games);
+}
+
+/// Drops a folder from the scan list by its stored path. The path is not
+/// canonicalized again: a deleted folder cannot be, and that is exactly the
+/// folder a user wants gone.
+fn remove_root(roots: &mut Vec<PathBuf>, root: &std::path::Path) {
+    roots.retain(|existing| existing != root);
 }
 
 #[cfg(windows)]
@@ -1399,6 +1413,20 @@ mod tests {
     }
 
     #[cfg(not(windows))]
+    #[test]
+    fn removing_a_root_works_after_its_folder_is_deleted() {
+        let kept = tempfile::tempdir().unwrap();
+        let deleted = tempfile::tempdir().unwrap();
+        let mut roots = vec![kept.path().to_path_buf(), deleted.path().to_path_buf()];
+        canonicalize_roots(&mut roots);
+        let stored = roots[1].clone();
+        drop(deleted);
+        assert!(!stored.exists());
+
+        remove_root(&mut roots, &stored);
+        assert_eq!(roots, [kept.path().canonicalize().unwrap()]);
+    }
+
     #[test]
     fn manual_scan_failures_are_reported() {
         let directory = tempfile::tempdir().unwrap();
