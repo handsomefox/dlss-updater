@@ -2,6 +2,12 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.2.1
+
+- Fix the Tools dialog growing to the full window height, with its buttons in the middle.
+- Make the DLSS indicator options visible, and show disabled buttons as plain instead of
+  faded green.
+
 ## 1.2.0
 
 - Show one status per game in the library: an Update button, "Up to date", or the reason
