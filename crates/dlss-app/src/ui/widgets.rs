@@ -158,6 +158,28 @@ pub(crate) fn tri_checkbox(
     .clicked()
 }
 
+/// egui's radio button, styled like [`checkbox`]: a visible ring, and an
+/// accent fill when chosen.
+pub(crate) fn radio_value<T: PartialEq>(
+    ui: &mut egui::Ui,
+    current: &mut T,
+    value: T,
+    label: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    let filled = *current == value;
+    checkbox_scope(ui, filled, |ui| ui.radio_value(current, value, label))
+}
+
+/// A primary button that turns into a plain one while disabled; a faded
+/// accent fill reads as broken rather than unavailable.
+pub(crate) fn primary_when(enabled: bool, icon: &str, label: &str) -> egui::Button<'static> {
+    if enabled {
+        primary_icon_button(icon, label)
+    } else {
+        egui::Button::new(icon_text(icon, label))
+    }
+}
+
 fn checkbox_scope<R>(ui: &mut egui::Ui, filled: bool, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     ui.scope(|ui| {
         ui.spacing_mut().icon_width = 16.0;
@@ -256,6 +278,17 @@ pub(crate) fn section_title(
         }
     });
     clicked
+}
+
+/// A one-row strip of buttons aligned to the right, primary first.
+///
+/// A right-to-left layout placed straight into a vertical one takes all the
+/// height left below it and centers its buttons there, which stretches a
+/// dialog to the full window. Inside a horizontal row it is one line tall.
+pub(crate) fn button_row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.horizontal(|ui| ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), add))
+        .inner
+        .inner
 }
 
 /// The placeholder for an empty table cell.

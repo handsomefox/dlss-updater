@@ -199,7 +199,7 @@ impl DlssApp {
         if ui
             .add_enabled(
                 can_update,
-                widgets::primary_icon_button(icons::SPARKLE, "Update DLSS"),
+                widgets::primary_when(can_update, icons::SPARKLE, "Update DLSS"),
             )
             .on_hover_text("Review DLSS updates for this game")
             .on_disabled_hover_text(reason)

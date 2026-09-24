@@ -108,7 +108,7 @@ impl DlssApp {
         if ui
             .add_enabled(
                 available,
-                widgets::primary_icon_button(icons::SPARKLE, "Update DLSS"),
+                widgets::primary_when(available, icons::SPARKLE, "Update DLSS"),
             )
             .on_hover_text("Review DLSS updates for the selected games")
             .on_disabled_hover_text(reason)
@@ -206,7 +206,7 @@ impl DlssApp {
             if ui
                 .add_enabled(
                     !self.busy(),
-                    widgets::primary_icon_button(icons::LIST_CHECKS, "Review and apply"),
+                    widgets::primary_when(!self.busy(), icons::LIST_CHECKS, "Review and apply"),
                 )
                 .on_disabled_hover_text("Wait for the current update to finish")
                 .clicked()

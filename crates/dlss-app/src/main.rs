@@ -843,13 +843,15 @@ impl DlssApp {
                     ui.strong(state_label(&self.tool_state));
                 });
                 ui.add_space(4.0);
-                ui.radio_value(&mut self.staged_tool_state, SystemToolState::Off, "Off");
-                ui.radio_value(
+                widgets::radio_value(ui, &mut self.staged_tool_state, SystemToolState::Off, "Off");
+                widgets::radio_value(
+                    ui,
                     &mut self.staged_tool_state,
                     SystemToolState::DlssIndicatorDebug,
                     "Only with debug DLLs",
                 );
-                ui.radio_value(
+                widgets::radio_value(
+                    ui,
                     &mut self.staged_tool_state,
                     SystemToolState::DlssIndicatorProduction,
                     "Always, with any DLSS DLL",
@@ -859,10 +861,13 @@ impl DlssApp {
                     widgets::banner(ui, theme::WARNING, icons::WARNING, error, false);
                 }
                 ui.add_space(10.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                widgets::button_row(ui, |ui| {
                     let changed = self.staged_tool_state != self.tool_state;
                     apply = ui
-                        .add_enabled(changed, widgets::primary_button("Apply"))
+                        .add_enabled(
+                            changed,
+                            widgets::primary_when(changed, icons::CHECK, "Apply"),
+                        )
                         .on_disabled_hover_text("Choose a different setting to apply")
                         .clicked();
                     #[cfg(windows)]

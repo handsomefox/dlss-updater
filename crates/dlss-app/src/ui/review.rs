@@ -470,7 +470,7 @@ impl Footer {
             .size(12.0),
         );
         ui.add_space(6.0);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        widgets::button_row(ui, |ui| {
             let primary = if self.ready {
                 self.apply_button(ui, checked)
             } else {
@@ -492,20 +492,17 @@ impl Footer {
 
     fn apply_button(&self, ui: &mut egui::Ui, checked: usize) -> bool {
         let label = format!("Apply {}", plural(checked, "change"));
-        // A faded accent button reads as broken rather than disabled, so an
-        // empty selection gets a plain one.
-        let button = if checked > 0 {
-            widgets::primary_icon_button(icons::CHECK, &label)
+        let enabled = checked > 0 && !self.busy;
+        ui.add_enabled(
+            enabled,
+            widgets::primary_when(enabled, icons::CHECK, &label),
+        )
+        .on_disabled_hover_text(if self.busy {
+            "Wait for the current update to finish"
         } else {
-            egui::Button::new(widgets::icon_text(icons::CHECK, &label))
-        };
-        ui.add_enabled(checked > 0 && !self.busy, button)
-            .on_disabled_hover_text(if self.busy {
-                "Wait for the current update to finish"
-            } else {
-                "Select at least one change"
-            })
-            .clicked()
+            "Select at least one change"
+        })
+        .clicked()
     }
 
     fn download_button(&self, ui: &mut egui::Ui) -> bool {
@@ -519,7 +516,7 @@ impl Footer {
         };
         ui.add_enabled(
             !self.downloading,
-            widgets::primary_icon_button(icons::DOWNLOAD_SIMPLE, &label),
+            widgets::primary_when(!self.downloading, icons::DOWNLOAD_SIMPLE, &label),
         )
         .on_disabled_hover_text("Downloading…")
         .clicked()

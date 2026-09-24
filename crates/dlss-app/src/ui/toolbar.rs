@@ -284,7 +284,7 @@ impl DlssApp {
         if ui
             .add_enabled(
                 enabled,
-                widgets::primary_icon_button(icons::SPARKLE, &label),
+                widgets::primary_when(enabled, icons::SPARKLE, &label),
             )
             .on_hover_text(hover)
             .on_disabled_hover_text(hover)
