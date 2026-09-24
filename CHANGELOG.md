@@ -18,6 +18,7 @@ Releases before 1.1.3 are listed on the [releases page](https://github.com/hands
 - Keep selection actions, staged changes, and Undo in a bar at the bottom of the window.
 - Fix dialogs that stopped at half the window height, the DLL sources list, which gave every
   release the same widget ID, and a download button that showed a broken icon.
+- Update rustls to 0.23.45, which fixes a TLS 1.3 handshake flaw (RUSTSEC-2026-0285).
 
 ## 1.1.3
 
