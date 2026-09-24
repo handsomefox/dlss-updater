@@ -248,22 +248,13 @@ impl DlssApp {
             .resizable(false)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(egui_extras::Column::remainder().at_least(200.0).clip(true))
-            .column(egui_extras::Column::exact(170.0).clip(true))
             .column(egui_extras::Column::exact(100.0))
             .column(egui_extras::Column::exact(100.0))
-            .column(egui_extras::Column::exact(170.0))
-            .column(egui_extras::Column::exact(30.0))
-            .column(egui_extras::Column::exact(262.0))
+            .column(egui_extras::Column::exact(165.0))
+            .column(egui_extras::Column::exact(28.0))
+            .column(egui_extras::Column::exact(232.0))
             .header(30.0, |mut header| {
-                for title in [
-                    "DLL",
-                    "File",
-                    "Installed",
-                    "Latest",
-                    "Status",
-                    "",
-                    "Version",
-                ] {
+                for title in ["DLL", "Installed", "Latest", "Status", "", "Version"] {
                     header.col(|ui| {
                         widgets::table_header_background(ui);
                         ui.label(widgets::table_header_text(title));
@@ -291,21 +282,22 @@ impl DlssApp {
                     });
                     row.col(|ui| {
                         let kind = dlss_core::DllKind::classify(&dll.file_name);
-                        ui.label(widgets::icon(dll_kind_icon(kind), 15.0, theme::ACCENT))
-                            .on_hover_text(dll_kind_heading(kind));
-                        ui.label(dlss_core::friendly_dll_label(&dll.file_name));
-                    });
-                    row.col(|ui| {
+                        ui.label(widgets::icon(dll_kind_icon(kind), 15.0, theme::ACCENT));
+                        ui.label(dlss_core::friendly_dll_label(&dll.file_name))
+                            .on_hover_text(format!(
+                                "{}\n{}",
+                                dll_kind_heading(kind),
+                                dll.path.display()
+                            ));
                         ui.add(
                             egui::Label::new(
                                 egui::RichText::new(dll.file_name.to_string_lossy())
                                     .monospace()
-                                    .size(12.0)
-                                    .color(theme::TEXT_MUTED),
+                                    .size(11.5)
+                                    .color(theme::TEXT_FAINT),
                             )
                             .truncate(),
-                        )
-                        .on_hover_text(dll.path.display().to_string());
+                        );
                     });
                     row.col(|ui| version_cell(ui, dll.metadata.version, theme::TEXT));
                     row.col(|ui| {
@@ -422,7 +414,7 @@ impl DlssApp {
                     ),
             };
             egui::ComboBox::from_id_salt(("desired", &dll.id.0))
-                .width(250.0)
+                .width(220.0)
                 .selected_text(selected_label)
                 .show_ui(ui, |ui| {
                     ui.selectable_value(
