@@ -117,7 +117,8 @@ impl DlssApp {
                             });
                         }
                         Some(release) => {
-                            open_sources = ui.button("Other releases…").clicked();
+                            // Right to left: the primary button goes first so
+                            // it sits rightmost, as in every dialog.
                             let failed = self.release_errors.get(&release.metadata.id);
                             let label = if failed.is_some() {
                                 "Try again".to_owned()
@@ -130,6 +131,7 @@ impl DlssApp {
                             {
                                 download = Some(release.metadata.id.clone());
                             }
+                            open_sources = ui.button("Other releases…").clicked();
                             if let Some(error) = failed {
                                 widgets::status_text(
                                     ui,

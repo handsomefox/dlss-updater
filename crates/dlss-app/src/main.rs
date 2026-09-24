@@ -732,6 +732,9 @@ impl DlssApp {
 
     /// Reverts the last change in each game, through the worker's undo plans.
     fn start_undo(&mut self, games: Vec<dlss_core::GameId>) {
+        if self.busy() {
+            return;
+        }
         let games: Vec<_> = games
             .into_iter()
             .filter(|id| self.undoable.contains(id) && !self.profiles_applying.contains_key(id))
