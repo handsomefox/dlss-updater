@@ -189,6 +189,15 @@ fn run(commands: &Receiver<Command>, events: &EventSink, mut roots: Vec<PathBuf>
         prepared: HashMap::new(),
     };
     events.send(Event::ImportsLoaded(state.imports.records.clone()));
+    // Show the saved catalog right away. The network refresh is queued behind
+    // the first scan, and until it lands the library would otherwise claim
+    // no release was downloaded, then change its mind.
+    if !state.assets.is_empty() {
+        events.send(Event::CatalogFinished(Ok(catalog_snapshot(
+            &state.assets,
+            &state.catalog,
+        ))));
+    }
     while let Ok(command) = commands.recv() {
         let span = tracing::info_span!("worker_command", command = command_name(&command));
         let _entered = span.enter();
