@@ -62,7 +62,6 @@ pub enum DllKind {
     DlssRayReconstruction,
     OtherNgx,
     Streamline,
-    ReflexLowLatency,
 }
 
 impl DllKind {
@@ -77,7 +76,6 @@ impl DllKind {
             "nvngx_dlss.dll" => Some(Self::DlssSuperResolution),
             "nvngx_dlssg.dll" => Some(Self::DlssFrameGeneration),
             "nvngx_dlssd.dll" => Some(Self::DlssRayReconstruction),
-            "nvlowlatencyvk.dll" => Some(Self::ReflexLowLatency),
             _ if name.starts_with("nvngx_") && name.ends_with(".dll") => Some(Self::OtherNgx),
             _ if name.starts_with("sl.") && name.ends_with(".dll") => Some(Self::Streamline),
             _ => None,
@@ -99,7 +97,6 @@ pub fn friendly_dll_label(file_name: &OsStr) -> String {
         Some(DllKind::DlssSuperResolution) => "DLSS Super Resolution".into(),
         Some(DllKind::DlssFrameGeneration) => "DLSS Frame Generation".into(),
         Some(DllKind::DlssRayReconstruction) => "DLSS Ray Reconstruction".into(),
-        Some(DllKind::ReflexLowLatency) => "NVIDIA Reflex Low Latency".into(),
         Some(DllKind::Streamline) => {
             let raw = file_name.to_string_lossy();
             let normalized = raw.to_ascii_lowercase();
@@ -512,6 +509,7 @@ mod tests {
             Some(DllKind::Streamline)
         );
         assert_eq!(DllKind::classify(OsStr::new("dxgi.dll")), None);
+        assert_eq!(DllKind::classify(OsStr::new("NvLowLatencyVk.dll")), None);
         assert!(DllKind::DlssSuperResolution.is_dlss_family());
         assert!(!DllKind::Streamline.is_dlss_family());
         assert_eq!(

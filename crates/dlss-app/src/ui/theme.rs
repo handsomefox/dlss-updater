@@ -200,7 +200,6 @@ pub(crate) mod icons {
     pub(crate) const MAGNIFYING_GLASS: &str = "\u{E30C}";
     pub(crate) const MINUS: &str = "\u{E32A}";
     pub(crate) const PACKAGE: &str = "\u{E390}";
-    pub(crate) const PULSE: &str = "\u{E000}";
     pub(crate) const QUESTION: &str = "\u{E3E8}";
     pub(crate) const SHIELD_CHECK: &str = "\u{E40C}";
     pub(crate) const SHIELD_SLASH: &str = "\u{E410}";

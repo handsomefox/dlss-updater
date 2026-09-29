@@ -547,7 +547,7 @@ mod tests {
     fn recognizes_only_supported_names() {
         assert!(is_managed_dll(OsStr::new("nvngx_dlss.dll")));
         assert!(is_managed_dll(OsStr::new("sl.interposer.dll")));
-        assert!(is_managed_dll(OsStr::new("NvLowLatencyVk.dll")));
+        assert!(!is_managed_dll(OsStr::new("NvLowLatencyVk.dll")));
         assert!(!is_managed_dll(OsStr::new("dxgi.dll")));
     }
 

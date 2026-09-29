@@ -14,10 +14,9 @@ pub(crate) fn dll_kind_rank(file_name: &std::ffi::OsStr) -> u8 {
         Some(dlss_core::DllKind::DlssSuperResolution) => 0,
         Some(dlss_core::DllKind::DlssFrameGeneration) => 1,
         Some(dlss_core::DllKind::DlssRayReconstruction) => 2,
-        Some(dlss_core::DllKind::ReflexLowLatency) => 3,
-        Some(dlss_core::DllKind::Streamline) => 4,
-        Some(dlss_core::DllKind::OtherNgx) => 5,
-        None => 6,
+        Some(dlss_core::DllKind::Streamline) => 3,
+        Some(dlss_core::DllKind::OtherNgx) => 4,
+        None => 5,
     }
 }
 
@@ -26,7 +25,6 @@ pub(crate) fn dll_kind_heading(kind: Option<dlss_core::DllKind>) -> &'static str
         Some(dlss_core::DllKind::DlssSuperResolution) => "DLSS Super Resolution",
         Some(dlss_core::DllKind::DlssFrameGeneration) => "DLSS Frame Generation",
         Some(dlss_core::DllKind::DlssRayReconstruction) => "DLSS Ray Reconstruction",
-        Some(dlss_core::DllKind::ReflexLowLatency) => "NVIDIA Reflex",
         Some(dlss_core::DllKind::Streamline) => "Streamline",
         Some(dlss_core::DllKind::OtherNgx) => "Other NGX",
         None => "Other",
@@ -38,7 +36,6 @@ pub(crate) fn dll_kind_icon(kind: Option<dlss_core::DllKind>) -> &'static str {
         Some(dlss_core::DllKind::DlssSuperResolution) => icons::SPARKLE,
         Some(dlss_core::DllKind::DlssFrameGeneration) => icons::LIGHTNING,
         Some(dlss_core::DllKind::DlssRayReconstruction) => icons::EYE,
-        Some(dlss_core::DllKind::ReflexLowLatency) => icons::PULSE,
         Some(dlss_core::DllKind::Streamline) => icons::STACK,
         Some(dlss_core::DllKind::OtherNgx) | None => icons::PACKAGE,
     }
