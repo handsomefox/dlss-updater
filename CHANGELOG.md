@@ -2,6 +2,12 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.3.1
+
+- Fix the release links in DLL sources and the repository link in About, which did not open.
+- Stop listing `NvLowLatencyVk.dll` in a game's DLLs. The file has no version, so the app could
+  not compare or replace it, and importing it failed.
+
 ## 1.3.0
 
 - Update egui from 0.35 to 0.36, along with the library that checks each downloaded DLL is a
