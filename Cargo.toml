@@ -11,7 +11,7 @@ description = "A Windows desktop app for safely updating official NVIDIA DLSS an
 
 [workspace.dependencies]
 crossbeam-channel = "=0.5.17"
-eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "glow", "persistence", "x11"] }
+eframe = { version = "=0.36.2", default-features = false, features = ["default_fonts", "glow", "links", "persistence", "x11"] }
 egui_extras = "=0.36.2"
 jiff = "=0.2.37"
 object = { version = "=0.40.0", features = ["pe"] }
