@@ -2,6 +2,12 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.3.0
+
+- Update egui from 0.35 to 0.36, along with the library that checks each downloaded DLL is a
+  64-bit Windows DLL, the HTTP client, and smaller dependencies.
+- Build with Rust 1.98.1.
+
 ## 1.2.1
 
 - Fix the Tools dialog growing to the full window height, with its buttons in the middle.
