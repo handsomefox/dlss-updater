@@ -783,7 +783,7 @@ fn scan_roots(roots: &[PathBuf]) -> dlss_core::DiscoveryOutcome {
         let mut game = match dlss_platform::manual_install(root) {
             Ok(game) => game,
             Err(error) => {
-                manual_errors.push(format!("{}: {error}", root.display()));
+                manual_errors.push(format!("{}: {error}", dlss_core::display_path(root)));
                 continue;
             }
         };

@@ -1409,7 +1409,7 @@ fn backup_warning_message(report: &dlss_core::BackupLoadReport) -> Option<String
             .map(|rejected| {
                 format!(
                     "{}: {}",
-                    rejected.record.original_path.display(),
+                    dlss_core::display_path(&rejected.record.original_path),
                     rejected.reason
                 )
             })
@@ -1591,7 +1591,7 @@ fn folder_row(ui: &mut egui::Ui, root: &std::path::Path) -> bool {
     let mut remove = false;
     ui.horizontal(|ui| {
         let missing = !root.is_dir();
-        let path = root.display().to_string();
+        let path = dlss_core::display_path(root);
         ui.scope(|ui| {
             ui.set_max_width((ui.available_width() - 200.0).max(120.0));
             ui.add(egui::Label::new(egui::RichText::new(&path).monospace()).truncate())

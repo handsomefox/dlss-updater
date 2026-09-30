@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 macro_rules! string_id {
@@ -107,6 +107,23 @@ pub fn friendly_dll_label(file_name: &OsStr) -> String {
             format!("Streamline — {component}")
         }
         Some(DllKind::OtherNgx) | None => file_name.to_string_lossy().into_owned(),
+    }
+}
+
+/// A path as a user would write it. On Windows `canonicalize` returns verbatim
+/// paths, `\\?\D:\Games` and `\\?\UNC\server\share`, and the app keeps those
+/// for comparisons and game IDs. Only the text shown to the user drops the
+/// prefix. Other verbatim forms, such as volume GUIDs, have no shorter
+/// spelling and are shown unchanged.
+#[must_use]
+pub fn display_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if rest.as_bytes().get(1) == Some(&b':') => rest.to_owned(),
+        _ => text.into_owned(),
     }
 }
 
@@ -445,6 +462,17 @@ pub enum ElevatedHelperPlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_path_drops_only_the_verbatim_prefix() {
+        let shown = |raw: &str| display_path(Path::new(raw));
+        assert_eq!(shown(r"\\?\D:\Games\Diablo IV"), r"D:\Games\Diablo IV");
+        assert_eq!(shown(r"\\?\UNC\nas\games\Control"), r"\\nas\games\Control");
+        assert_eq!(shown(r"\\?\Volume{0b1c}\Games"), r"\\?\Volume{0b1c}\Games");
+        assert_eq!(shown(r"D:\Games"), r"D:\Games");
+        assert_eq!(shown("/home/demo/Games"), "/home/demo/Games");
+    }
+
     fn meta(v: Option<DllVersion>, hash: u8) -> DllMetadata {
         DllMetadata {
             version: v,

@@ -112,7 +112,7 @@ impl DlssApp {
                 });
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
-                    let path = game.root.display().to_string();
+                    let path = dlss_core::display_path(&game.root);
                     ui.scope(|ui| {
                         ui.set_max_width((ui.available_width() - 420.0).max(200.0));
                         ui.add(
@@ -284,7 +284,7 @@ impl DlssApp {
                             .on_hover_text(format!(
                                 "{}\n{}",
                                 dll_kind_heading(kind),
-                                dll.path.display()
+                                dlss_core::display_path(&dll.path)
                             ));
                         ui.add(
                             egui::Label::new(
