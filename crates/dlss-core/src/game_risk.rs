@@ -1,8 +1,8 @@
 //! Advisory game-risk matching.
 //!
-//! This is the exact 36-row snapshot from
+//! This is the exact 38-row snapshot from
 //! <https://raw.githubusercontent.com/Recol/DLSS-Updater-Whitelist/main/whitelist.csv>
-//! retrieved on 2026-07-11. Despite that repository's historical name, the
+//! retrieved on 2026-09-30. Despite that repository's historical name, the
 //! upstream project presents these as blacklisted/unsupported games. Its
 //! blacklist covers several safety and compatibility reasons (including DLLs
 //! replaced on launch and old or game-specific implementations), not confirmed
@@ -15,7 +15,7 @@ pub const KNOWN_GAME_RISK_WARNING: &str = "Known online/anti-cheat risk. Replaci
 
 /// `(snapshot entry, canonical display name)`. Aliases remain separate rows so
 /// the vendored snapshot stays auditable and exact.
-const KNOWN_GAME_RISKS: [(&str, &str); 36] = [
+const KNOWN_GAME_RISKS: [(&str, &str); 38] = [
     ("3DMark", "3DMark"),
     ("Fortnite", "Fortnite"),
     ("The First Descendant", "The First Descendant"),
@@ -61,6 +61,11 @@ const KNOWN_GAME_RISKS: [(&str, &str); 36] = [
     ("NINJAGAIDEN4", "NINJA GAIDEN 4"),
     ("MonsterHunterWilds", "Monster Hunter Wilds"),
     ("FINAL FANTASY XVI", "FINAL FANTASY XVI"),
+    ("Assassin's Creed Shadows", "Assassin's Creed Shadows"),
+    (
+        "Assassin's Creed Black Flag Resynced",
+        "Assassin's Creed Black Flag Resynced",
+    ),
 ];
 
 /// Returns the canonical upstream risk name when either the discovered display
