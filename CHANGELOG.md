@@ -2,6 +2,13 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.3.2
+
+- Warn about anti-cheat risk for Assassin's Creed Shadows and Assassin's Creed Black Flag
+  Resynced, which the upstream known-risk list added in August.
+- Show game folders as `D:\Games\...` rather than `\\?\D:\Games\...` in Game folders, on a
+  game's page, and in scan errors.
+
 ## 1.3.1
 
 - Fix the release links in DLL sources and the repository link in About, which did not open.
