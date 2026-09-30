@@ -11,6 +11,7 @@ A Windows desktop app that replaces the official NVIDIA Streamline and DLSS DLLs
 - Accepts game folders you add by hand.
 - Offers one-click upgrades to strictly newer DLLs, plus reviewed changes per DLL or in bulk.
 - Downloads official NVIDIA Streamline release archives on demand.
+- Imports a DLL you already have, such as one from another game, if it is an x86-64 DLL signed by NVIDIA.
 - Validates archive paths, file sizes, PE architecture, hashes, and Authenticode signatures.
 - Backs up every DLL it replaces, so you can undo the last run or restore an older version.
 - Toggles the NVIDIA DLSS on-screen indicator, and can toggle it back.
@@ -22,6 +23,16 @@ Before the app replaces a DLL, it hashes the installed file and plans the swap a
 Some game folders need administrator rights. For those, the app writes a plan file and relaunches itself as an elevated helper under UAC. The helper does not trust the plan it was handed. It re-validates every path, and it accepts exactly one system setting: the DLSS on-screen indicator.
 
 This project is not affiliated with or endorsed by NVIDIA. DLSS, NVIDIA, and Streamline are trademarks of NVIDIA Corporation.
+
+## Install
+
+Download the latest release from the [releases page](https://github.com/handsomefox/dlss-updater/releases). Unpack `dlss-updater-<version>-windows-x86_64.zip` and run `dlss-updater.exe` from the folder inside it. `SHA256SUMS` beside the archive holds its checksum.
+
+The app runs on Windows 10 and 11, x86-64.
+
+## Diagnostics
+
+The app writes logs to `%LOCALAPPDATA%\DLSS Updater\logs\`, and **About** has a button that opens the folder. If something fails, attach the newest log file to your issue.
 
 ## Development
 
