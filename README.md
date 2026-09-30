@@ -16,6 +16,10 @@ A Windows desktop app that replaces the official NVIDIA Streamline and DLSS DLLs
 - Backs up every DLL it replaces, so you can undo the last run or restore an older version.
 - Toggles the NVIDIA DLSS on-screen indicator, and can toggle it back.
 
+**DLL sources** lists every official Streamline release. Games are compared against the newest, and a game's page can pick an older one for a single DLL.
+
+![The DLL sources dialog, listing eight Streamline releases with v2.14.1 marked Latest](docs/dll-sources.png)
+
 ## Safety model
 
 Before the app replaces a DLL, it hashes the installed file and plans the swap against that hash. It copies the current file into a content-addressed backup store, writes the new DLL, then re-reads the result to confirm the replacement. If the installed file changed between the plan and the write, the swap fails instead of overwriting something unexpected.
@@ -59,6 +63,8 @@ bash scripts/package-windows.sh
 ```
 
 The packaging script needs `cargo-xwin` 0.23.1, `jq`, `zip`, `unzip`, and GNU `sha256sum`. It checks the archive contents and the checksums before it reports success.
+
+The picture above comes from `cargo run -p dlss-app` on Linux. A Linux build lists releases the same way a Windows build does, but it reads no DLL versions and downloads nothing.
 
 The app downloads only release assets from the official `NVIDIA-RTX/Streamline` repository. Older release tags stay metadata-only until you download one, and the app validates it then. Version 1 does not import local ZIP files and does not discover Microsoft Store or Xbox installations. Both omissions are deliberate.
 
