@@ -2,6 +2,10 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.3.3
+
+- Update thiserror to 2.0.21.
+
 ## 1.3.2
 
 - Warn about anti-cheat risk for Assassin's Creed Shadows and Assassin's Creed Black Flag
