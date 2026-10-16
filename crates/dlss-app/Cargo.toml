@@ -28,7 +28,7 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 
 [build-dependencies]
-embed-resource = "=3.0.11"
+embed-resource = "=3.0.12"
 
 [dev-dependencies]
 serde_json.workspace = true
