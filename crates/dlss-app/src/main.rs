@@ -28,7 +28,13 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1400.0, 860.0])
-            .with_min_inner_size([1000.0, 640.0]),
+            .with_min_inner_size([1000.0, 640.0])
+            // Without an icon eframe shows egui's own in the title bar and
+            // taskbar, not the one embedded in the executable.
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/app-icon.png"))
+                    .expect("the bundled app icon is a valid PNG"),
+            ),
         ..Default::default()
     };
     let result = eframe::run_native(
