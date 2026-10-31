@@ -26,7 +26,11 @@ impl DlssApp {
             &mut open,
             |ui| {
                 refresh = self.official_releases(ui, &mut action);
-                ui.add_space(16.0);
+                // A separator between the two sections, as in the other
+                // dialogs. The release list ends in a card frame, which, like
+                // a button, gets a little extra space before it.
+                ui.add_space(4.0);
+                ui.separator();
                 import = widgets::section_title(
                     ui,
                     "Imported DLLs",
