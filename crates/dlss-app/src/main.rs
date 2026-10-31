@@ -1138,10 +1138,17 @@ impl DlssApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .button(widgets::icon_text(icons::ARROW_CIRCLE_UP, "App updates…"))
-                        .on_hover_text("Check for a new version and choose how often to check")
+                        .button(widgets::icon_text(
+                            icons::ARROW_CIRCLE_UP,
+                            "Check for updates",
+                        ))
+                        .on_hover_text("Check GitHub for a new version now")
                         .clicked()
                     {
+                        // The label promises a check, so start one rather
+                        // than only opening the dialog. A check already
+                        // running is left alone.
+                        self.updater.check_now();
                         self.open_windows.insert(AppWindow::Update);
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
