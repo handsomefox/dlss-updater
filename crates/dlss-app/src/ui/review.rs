@@ -614,7 +614,9 @@ fn review_row(ui: &mut egui::Ui, row: &mut ReviewRow) {
             6.0,
             egui::TextFormat {
                 font_id: egui::FontId::new(14.0, egui::FontFamily::Proportional),
-                color: egui::Color32::PLACEHOLDER,
+                // An unnamed color falls back to the widget style, which the
+                // checkbox scope darkens for the check mark.
+                color: theme::TEXT,
                 ..Default::default()
             },
         );
