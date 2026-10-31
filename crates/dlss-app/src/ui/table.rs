@@ -100,6 +100,12 @@ pub(crate) fn selection_range(
     Some(from.min(clicked)..=from.max(clicked))
 }
 
+/// Size of the semibold column header labels.
+const HEADER_SIZE: f32 = 12.5;
+
+/// Size of the sort arrow beside a header label.
+const SORT_MARKER_SIZE: f32 = 11.0;
+
 pub(crate) fn sort_header(
     ui: &mut eframe::egui::Ui,
     label: &str,
@@ -120,7 +126,7 @@ pub(crate) fn sort_header(
         label,
         0.0,
         egui::TextFormat {
-            font_id: egui::FontId::new(12.5, egui::FontFamily::Name("semibold".into())),
+            font_id: egui::FontId::new(HEADER_SIZE, egui::FontFamily::Name("semibold".into())),
             color,
             ..Default::default()
         },
@@ -129,11 +135,7 @@ pub(crate) fn sort_header(
         job.append(
             marker,
             4.0,
-            egui::TextFormat {
-                font_id: theme::icon_font(11.0),
-                color: theme::ACCENT,
-                ..Default::default()
-            },
+            super::widgets::icon_format(SORT_MARKER_SIZE, theme::ACCENT, HEADER_SIZE),
         );
     }
     let direction = if active {

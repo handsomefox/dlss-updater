@@ -12,6 +12,20 @@ pub(crate) fn search_field_id() -> egui::Id {
     egui::Id::unique("game_search")
 }
 
+/// Padding around the library tabs. With it the tab strip is the tallest
+/// control in its row, so the row is sized from it.
+const TAB_STRIP_MARGIN: i8 = 3;
+
+/// Height of the tab strip: a button plus the strip's padding. The search
+/// box matches it so the two read as one row of controls.
+///
+/// egui makes every non-small button at least `interact_size.y` tall, so a
+/// smaller `min_size` on the tabs has no effect; the strip height follows
+/// the theme's interact height.
+fn tab_strip_height(ui: &egui::Ui) -> f32 {
+    ui.spacing().interact_size.y + 2.0 * f32::from(TAB_STRIP_MARGIN)
+}
+
 impl DlssApp {
     pub(crate) fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
@@ -146,6 +160,11 @@ impl DlssApp {
 
     fn library_controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            // egui centers each control in the row height known when it is
+            // added, so the search box, added first, sat at the top of the
+            // taller tab strip. Reserving the strip's height up front centers
+            // every control in the row.
+            ui.set_min_height(tab_strip_height(ui));
             self.search_box(ui);
             ui.add_space(4.0);
             self.filter_tabs(ui);
@@ -173,9 +192,10 @@ impl DlssApp {
 
     fn search_box(&mut self, ui: &mut egui::Ui) {
         let response = ui.add_sized(
-            [240.0, 30.0],
+            [240.0, tab_strip_height(ui)],
             egui::TextEdit::singleline(&mut self.filter)
                 .id(search_field_id())
+                .align(egui::Align2::LEFT_CENTER)
                 .margin(egui::Margin::symmetric(8, 6))
                 .hint_text(widgets::icon_text(icons::MAGNIFYING_GLASS, "Search games")),
         );
@@ -200,9 +220,10 @@ impl DlssApp {
         egui::Frame::new()
             .fill(theme::BG_APP)
             .corner_radius(egui::CornerRadius::same(8))
-            .inner_margin(egui::Margin::same(3))
+            .inner_margin(egui::Margin::same(TAB_STRIP_MARGIN))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
+                let height = ui.spacing().interact_size.y;
                 for (tab, count) in counts {
                     let always = matches!(
                         tab,
@@ -217,7 +238,7 @@ impl DlssApp {
                     if ui
                         .add(
                             egui::Button::selectable(selected, text)
-                                .min_size(egui::vec2(0.0, 26.0)),
+                                .min_size(egui::vec2(0.0, height)),
                         )
                         .on_hover_text(hover)
                         .clicked()
