@@ -49,7 +49,7 @@ The app runs on Windows 10 and 11, x86-64.
 
 ## Updates
 
-The app checks this repository's GitHub releases for a new version once a day. To check more or less often, or never, open **About** > **App updates**. A check is one request to the GitHub API, and it sends nothing about you or your games.
+The app checks this repository's GitHub releases for a new version each time it starts. To check less often, or never, open **About** > **App updates**. A check is one request to the GitHub API, and it sends nothing about you or your games.
 
 When a new version is out, a chip in the toolbar names it. Click the chip to read the notes of every release since yours, then choose **Download update**, **Skip this version**, or **Not now**. The download must match both the release's `SHA256SUMS` and the SHA-256 that GitHub records for the file. **Restart to update** moves the new `dlss-updater.exe` into place and reopens the app. The replaced executable stays beside it as `dlss-updater.exe.old` until the next start.
 

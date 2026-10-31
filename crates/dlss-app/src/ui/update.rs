@@ -120,10 +120,7 @@ fn update_body(
         ));
     } else {
         ui.label(
-            egui::RichText::new(format!(
-                "You have version {current}. It has not checked for a new version yet."
-            ))
-            .color(theme::TEXT_MUTED),
+            egui::RichText::new(format!("You have version {current}.")).color(theme::TEXT_MUTED),
         );
     }
     if let Some(error) = updater.error() {
