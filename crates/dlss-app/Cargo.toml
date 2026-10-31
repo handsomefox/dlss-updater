@@ -14,11 +14,11 @@ name = "dlss-updater"
 path = "src/main.rs"
 
 [dependencies]
-app-update = { version = "=1.4.1", path = "../app-update" }
+app-update = { version = "=1.4.2", path = "../app-update" }
 crossbeam-channel.workspace = true
-dlss-catalog = { version = "=1.4.1", path = "../dlss-catalog" }
-dlss-core = { version = "=1.4.1", path = "../dlss-core" }
-dlss-platform = { version = "=1.4.1", path = "../dlss-platform" }
+dlss-catalog = { version = "=1.4.2", path = "../dlss-catalog" }
+dlss-core = { version = "=1.4.2", path = "../dlss-core" }
+dlss-platform = { version = "=1.4.2", path = "../dlss-platform" }
 eframe.workspace = true
 egui_extras.workspace = true
 jiff.workspace = true
