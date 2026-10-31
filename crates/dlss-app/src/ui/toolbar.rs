@@ -9,7 +9,7 @@ use eframe::egui;
 /// Stable id for the search box, so a keyboard shortcut can focus it from
 /// anywhere in the app.
 pub(crate) fn search_field_id() -> egui::Id {
-    egui::Id::new("game_search")
+    egui::Id::unique("game_search")
 }
 
 impl DlssApp {

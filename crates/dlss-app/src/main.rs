@@ -1587,7 +1587,7 @@ impl DlssApp {
         // Deliberately not dismissible: unlike every other dialog, this one
         // ignores Esc and backdrop clicks, because continuing has to be an
         // explicit acknowledgement.
-        egui::Modal::new(egui::Id::new("disclaimer")).show(ctx, |ui| {
+        egui::Modal::new(egui::Id::unique("disclaimer")).show(ctx, |ui| {
             ui.set_max_width(460.0);
             ui.heading("Before you continue");
             ui.add_space(8.0);

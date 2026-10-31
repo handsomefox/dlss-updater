@@ -355,7 +355,7 @@ pub(crate) fn modal_with_actions<R>(
 ) -> R {
     // Leave room for the backdrop so a tall dialog never runs off-screen.
     let available = ctx.content_rect().size();
-    let response = egui::Modal::new(egui::Id::new(dialog.id)).show(ctx, |ui| {
+    let response = egui::Modal::new(egui::Id::unique(dialog.id)).show(ctx, |ui| {
         ui.set_width(dialog.width.min(available.x - 48.0));
         let mut close = false;
         ui.horizontal(|ui| {

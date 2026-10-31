@@ -162,7 +162,7 @@ impl DlssApp {
         let mut dismiss = false;
         let mut undo = false;
         let can_undo = toast.offers_undo && !self.last_change.is_empty() && !busy;
-        let response = egui::Area::new("toast".into())
+        let response = egui::Area::new(egui::Id::unique("toast"))
             .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -(FOOTER_HEIGHT + 12.0)])
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
