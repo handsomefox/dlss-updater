@@ -2,6 +2,17 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.4.1
+
+- Give DLSS Updater a new icon, with transparent corners in Explorer, shortcuts, and the
+  taskbar. Thanks to groozchique for the corner fix.
+- Show the app's icon in the title bar and the taskbar, where egui's default icon appeared
+  before. Thanks to groozchique for this fix.
+- Update eframe and egui_extras to 0.37. The first launch after this update opens at the default
+  window size and position. Later launches remember the window again.
+- Update flate2 to 1.1.10, serde_json to 1.0.154, sha2 to 0.11.1, windows-registry to 0.100.0,
+  and zip to 9.2.0.
+
 ## 1.4.0
 
 - DLSS Updater can now update itself from its GitHub releases. It checks once a day, and when a
