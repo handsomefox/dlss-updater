@@ -2,6 +2,11 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.4.3
+
+- Fix the DLL names in **Review DLSS updates**, which turned almost black on ticked rows in 1.4.1
+  and 1.4.2.
+
 ## 1.4.2
 
 - New installs check for a new version each time the app starts. Existing installs keep their
