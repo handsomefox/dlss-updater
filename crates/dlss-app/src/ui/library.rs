@@ -248,7 +248,7 @@ impl DlssApp {
 
     fn matches_search_and_store(&self, game: &GameRow, search: &str) -> bool {
         let text_matches = search.is_empty()
-            || game.name.to_lowercase().contains(search)
+            || game.folded_name.contains(search)
             || game.store.to_lowercase().contains(search);
         let store_matches = match self.store_filter {
             StoreFilter::All => true,

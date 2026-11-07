@@ -218,6 +218,8 @@ struct GameRow {
     id: dlss_core::GameId,
     selected: bool,
     name: String,
+    /// `name` in lowercase, folded once per scan for sorting and search.
+    folded_name: String,
     store: &'static str,
     store_kind: dlss_core::StoreKind,
     root: std::path::PathBuf,
@@ -261,6 +263,7 @@ impl GameRow {
         Self {
             id: game.id,
             selected: false,
+            folded_name: game.name.to_lowercase(),
             name: game.name,
             store: match store_kind {
                 dlss_core::StoreKind::Steam => "Steam",

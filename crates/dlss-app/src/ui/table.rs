@@ -66,21 +66,17 @@ pub(crate) fn sort_rows(rows: &mut [usize], games: &[GameRow], sort: GameSort, l
                     (None, Some(_)) => Ordering::Greater,
                     (None, None) => Ordering::Equal,
                 }
-                .then_with(|| folded_name(left).cmp(&folded_name(right)));
+                .then_with(|| left.folded_name.cmp(&right.folded_name));
             }
             SortKey::Status => row_status(left, latest_ready).cmp(&row_status(right, latest_ready)),
         };
-        let order = order.then_with(|| folded_name(left).cmp(&folded_name(right)));
+        let order = order.then_with(|| left.folded_name.cmp(&right.folded_name));
         if sort.ascending {
             order
         } else {
             order.reverse()
         }
     });
-}
-
-fn folded_name(game: &GameRow) -> String {
-    game.name.to_lowercase()
 }
 
 /// The visible rows from the shift-click anchor to the clicked row,
@@ -184,6 +180,7 @@ pub(crate) mod tests {
             id: GameId(name.into()),
             selected: false,
             name: name.into(),
+            folded_name: name.to_lowercase(),
             store,
             store_kind: StoreKind::Manual,
             root: name.into(),
