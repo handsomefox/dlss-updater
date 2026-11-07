@@ -1305,42 +1305,18 @@ impl DlssApp {
             .retain(|id, _| !ids.contains(id));
     }
 
+    /// Counts each game's updates with the planners the review uses, so a
+    /// count never disagrees with the rows the review lists.
     fn refresh_upgrade_counts(&mut self) {
-        let latest = self
-            .catalog_release
-            .as_ref()
-            .and_then(|tag| {
-                self.releases.iter().find(|release| {
-                    release.state == dlss_core::ReleaseState::Ready && &release.metadata.tag == tag
-                })
-            })
-            .map(|release| release.dlls.clone())
-            .unwrap_or_default();
+        let latest = self.latest_catalog();
         for game in &mut self.games {
-            let is_upgrade = |installed: &&dlss_core::DllInstallation| {
-                let Some(installed_version) = installed.metadata.version else {
-                    return false;
-                };
-                latest.iter().any(|candidate| {
-                    dlss_core::same_file_name(&candidate.file_name, &installed.file_name)
-                        && candidate.version > installed_version
-                        && !dlss_core::crosses_dlss_generation(
-                            &installed.file_name,
-                            Some(installed_version),
-                            Some(candidate.version),
-                        )
-                })
-            };
-            game.upgrades = game.details.iter().filter(is_upgrade).count();
-            game.dlss_upgrades = game
-                .details
-                .iter()
-                .filter(|installed| {
-                    dlss_core::DllKind::classify(&installed.file_name)
-                        .is_some_and(dlss_core::DllKind::is_dlss_family)
-                })
-                .filter(is_upgrade)
-                .count();
+            game.upgrades = dlss_core::plan_strict_upgrades("count", &game.details, &latest)
+                .swaps
+                .len();
+            game.dlss_upgrades =
+                dlss_core::plan_dlss_only_upgrades("count", &game.details, &latest)
+                    .swaps
+                    .len();
         }
     }
 
