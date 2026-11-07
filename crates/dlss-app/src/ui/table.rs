@@ -120,7 +120,7 @@ pub(crate) fn sort_header(
         label,
         0.0,
         egui::TextFormat {
-            font_id: egui::FontId::new(12.5, egui::FontFamily::Name("semibold".into())),
+            font_id: theme::semibold_font(12.5),
             color,
             ..Default::default()
         },

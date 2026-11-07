@@ -97,10 +97,7 @@ impl DlssApp {
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&game.name).font(egui::FontId::new(
-                        24.0,
-                        egui::FontFamily::Name("semibold".into()),
-                    )));
+                    ui.label(egui::RichText::new(&game.name).font(theme::semibold_font(24.0)));
                     widgets::badge(ui, game.store, theme::INFO);
                     if let Some(risk_name) = game.known_risk {
                         widgets::chip(ui, icons::WARNING, "Known risk", theme::WARNING)

@@ -219,12 +219,7 @@ impl ReleaseRow<'_> {
         let mut action = None;
         ui.horizontal(|ui| {
             ui.set_min_height(32.0);
-            ui.label(
-                egui::RichText::new(&release.metadata.tag).font(egui::FontId::new(
-                    14.0,
-                    egui::FontFamily::Name("semibold".into()),
-                )),
-            );
+            ui.label(egui::RichText::new(&release.metadata.tag).font(theme::semibold_font(14.0)));
             if self.latest {
                 widgets::badge(ui, "Latest", theme::ACCENT);
             }

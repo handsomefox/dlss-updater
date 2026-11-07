@@ -15,10 +15,7 @@ pub(crate) fn search_field_id() -> egui::Id {
 impl DlssApp {
     pub(crate) fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("DLSS Updater").font(egui::FontId::new(
-                20.0,
-                egui::FontFamily::Name("semibold".into()),
-            )));
+            ui.label(egui::RichText::new("DLSS Updater").font(theme::semibold_font(20.0)));
             ui.add_space(4.0);
             self.release_status(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -60,13 +57,8 @@ impl DlssApp {
                 "The release list could not be loaded",
             ),
         };
-        let chip = egui::Button::new(widgets::colored_icon_label(icon, &text, color, 12.5))
-            .fill(color.gamma_multiply(0.14))
-            .stroke(egui::Stroke::NONE)
-            .corner_radius(egui::CornerRadius::same(10))
-            .min_size(egui::vec2(0.0, 24.0));
         if ui
-            .add(chip)
+            .add(widgets::chip_button(icon, &text, color))
             .on_hover_text(format!("{hover}. Click to manage DLL sources."))
             .clicked()
         {

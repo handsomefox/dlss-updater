@@ -7,9 +7,15 @@
 use eframe::egui;
 
 pub(crate) const ICON_FAMILY_NAME: &str = "phosphor-icons";
+const SEMIBOLD_FAMILY_NAME: &str = "semibold";
 
 pub(crate) fn icon_font(size: f32) -> egui::FontId {
     egui::FontId::new(size, egui::FontFamily::Name(ICON_FAMILY_NAME.into()))
+}
+
+/// The semibold Inter face, for titles and names that lead a row.
+pub(crate) fn semibold_font(size: f32) -> egui::FontId {
+    egui::FontId::new(size, egui::FontFamily::Name(SEMIBOLD_FAMILY_NAME.into()))
 }
 
 // Layered backgrounds, darkest (app chrome) to lightest (interactive widgets).
@@ -51,10 +57,7 @@ fn style(style: &mut egui::Style) {
     style.spacing.menu_margin = egui::Margin::same(8);
     style.interaction.selectable_labels = false;
     style.text_styles = [
-        (
-            egui::TextStyle::Heading,
-            egui::FontId::new(19.0, egui::FontFamily::Name("semibold".into())),
-        ),
+        (egui::TextStyle::Heading, semibold_font(19.0)),
         (
             egui::TextStyle::Body,
             egui::FontId::new(14.0, egui::FontFamily::Proportional),
@@ -157,7 +160,7 @@ fn font_definitions() -> egui::FontDefinitions {
         .or_default();
     monospace.insert(0, "jetbrains-mono".into());
     fonts.families.insert(
-        egui::FontFamily::Name("semibold".into()),
+        egui::FontFamily::Name(SEMIBOLD_FAMILY_NAME.into()),
         vec!["inter-semibold".into()],
     );
     fonts.families.insert(

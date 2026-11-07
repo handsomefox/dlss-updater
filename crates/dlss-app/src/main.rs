@@ -301,11 +301,8 @@ impl DlssApp {
             .storage
             .and_then(|s| eframe::get_value(s, eframe::APP_KEY))
             .unwrap_or_default();
-        if persisted.activity.len() > 500 {
-            let excess = persisted.activity.len() - 500;
-            persisted.activity.drain(..excess);
-        }
-        canonicalize_roots(&mut persisted.custom_roots);
+        trim_activity(&mut persisted.activity);
+        worker::canonicalize_roots(&mut persisted.custom_roots);
         #[cfg(windows)]
         let capabilities = dlss_platform::windows::capabilities();
         #[cfg(not(windows))]
@@ -730,15 +727,13 @@ impl DlssApp {
     /// and the final summary cover the whole run.
     fn start_batch(&mut self, kind: BatchKind, games: &[dlss_core::GameId]) {
         let single_name = (games.len() == 1).then(|| self.game_name(&games[0]));
+        let message = match &single_name {
+            Some(name) => format!("{} {name}…", kind.verb_ing()),
+            None => format!("{} {} games…", kind.verb_ing(), games.len()),
+        };
         self.last_change.clear();
         self.batch = Some(Batch::new(kind, games.len(), single_name));
-        self.notify(
-            ToastKind::Progress,
-            match games.len() {
-                1 => format!("{} {}…", kind.verb_ing(), self.game_name(&games[0])),
-                count => format!("{} {count} games…", kind.verb_ing()),
-            },
-        );
+        self.notify(ToastKind::Progress, message);
     }
 
     fn finish_batch_if_done(&mut self) {
@@ -1202,12 +1197,8 @@ impl DlssApp {
     }
 
     fn append_activity(&mut self, record: dlss_core::ActivityRecord) {
-        const MAX_ACTIVITY: usize = 500;
         self.persisted.activity.push(record);
-        if self.persisted.activity.len() > MAX_ACTIVITY {
-            let excess = self.persisted.activity.len() - MAX_ACTIVITY;
-            self.persisted.activity.drain(..excess);
-        }
+        trim_activity(&mut self.persisted.activity);
     }
 
     fn refresh_tool_state(&mut self) {
@@ -1436,15 +1427,13 @@ impl DlssApp {
     }
 }
 
-fn canonicalize_roots(roots: &mut Vec<std::path::PathBuf>) {
-    let mut normalized = Vec::with_capacity(roots.len());
-    for root in roots.drain(..) {
-        let root = root.canonicalize().unwrap_or(root);
-        if !normalized.contains(&root) {
-            normalized.push(root);
-        }
+/// Keeps only the newest entries of the activity log.
+fn trim_activity(activity: &mut Vec<dlss_core::ActivityRecord>) {
+    const MAX_ACTIVITY: usize = 500;
+    if activity.len() > MAX_ACTIVITY {
+        let excess = activity.len() - MAX_ACTIVITY;
+        activity.drain(..excess);
     }
-    *roots = normalized;
 }
 
 fn backup_warning_message(report: &dlss_core::BackupLoadReport) -> Option<String> {

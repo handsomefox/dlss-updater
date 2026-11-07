@@ -72,6 +72,16 @@ pub(crate) fn colored_icon_label(
     job.into()
 }
 
+/// A tinted, borderless pill that is also a button, for the toolbar's status
+/// chips.
+pub(crate) fn chip_button(icon: &str, label: &str, color: egui::Color32) -> egui::Button<'static> {
+    egui::Button::new(colored_icon_label(icon, label, color, 12.5))
+        .fill(color.gamma_multiply(0.14))
+        .stroke(egui::Stroke::NONE)
+        .corner_radius(egui::CornerRadius::same(10))
+        .min_size(egui::vec2(0.0, 24.0))
+}
+
 /// A tab label followed by its count in a quieter color, like "Updates 3".
 pub(crate) fn label_with_count(label: &str, count: usize, selected: bool) -> egui::WidgetText {
     let mut job = egui::text::LayoutJob::default();
@@ -264,10 +274,7 @@ pub(crate) fn section_title(
     let mut clicked = false;
     ui.horizontal(|ui| {
         ui.set_min_height(30.0);
-        ui.label(egui::RichText::new(title).font(egui::FontId::new(
-            15.5,
-            egui::FontFamily::Name("semibold".into()),
-        )));
+        ui.label(egui::RichText::new(title).font(theme::semibold_font(15.5)));
         if let Some((button, hover, enabled)) = action {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 clicked = ui

@@ -27,18 +27,12 @@ impl DlssApp {
         } else {
             format!("Update {} available", release.version)
         };
-        let chip = egui::Button::new(widgets::colored_icon_label(
-            icons::ARROW_CIRCLE_UP,
-            &text,
-            theme::ACCENT,
-            12.5,
-        ))
-        .fill(theme::ACCENT.gamma_multiply(0.14))
-        .stroke(egui::Stroke::NONE)
-        .corner_radius(egui::CornerRadius::same(10))
-        .min_size(egui::vec2(0.0, 24.0));
         if ui
-            .add(chip)
+            .add(widgets::chip_button(
+                icons::ARROW_CIRCLE_UP,
+                &text,
+                theme::ACCENT,
+            ))
             .on_hover_text("A new version of DLSS Updater is out. Click to see what changed.")
             .clicked()
         {
@@ -87,10 +81,7 @@ impl DlssApp {
 }
 
 fn semibold(text: impl Into<String>, size: f32) -> egui::RichText {
-    egui::RichText::new(text).font(egui::FontId::new(
-        size,
-        egui::FontFamily::Name("semibold".into()),
-    ))
+    egui::RichText::new(text).font(theme::semibold_font(size))
 }
 
 fn update_body(

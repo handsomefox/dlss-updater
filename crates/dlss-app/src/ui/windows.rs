@@ -1,38 +1,28 @@
 use dlss_core::{ReleaseState, SystemToolState};
 
 pub(crate) fn format_timestamp(timestamp: i64) -> String {
-    jiff::Timestamp::from_second(timestamp).map_or_else(
-        |_| timestamp.to_string(),
-        |timestamp| {
-            timestamp
-                .to_zoned(jiff::tz::TimeZone::system())
-                .strftime("%Y-%m-%d %H:%M:%S")
-                .to_string()
-        },
-    )
+    format_local(timestamp, "%Y-%m-%d %H:%M:%S")
 }
 
 /// The local calendar date, for release and import dates.
 pub(crate) fn format_date(timestamp: i64) -> String {
-    jiff::Timestamp::from_second(timestamp).map_or_else(
-        |_| timestamp.to_string(),
-        |timestamp| {
-            timestamp
-                .to_zoned(jiff::tz::TimeZone::system())
-                .strftime("%Y-%m-%d")
-                .to_string()
-        },
-    )
+    format_local(timestamp, "%Y-%m-%d")
 }
 
 /// Hours and minutes in local time, for "today" moments like the last update.
 pub(crate) fn format_time(timestamp: i64) -> String {
+    format_local(timestamp, "%H:%M")
+}
+
+/// A Unix timestamp in the system time zone, or the raw number when it is
+/// out of range.
+fn format_local(timestamp: i64, format: &str) -> String {
     jiff::Timestamp::from_second(timestamp).map_or_else(
         |_| timestamp.to_string(),
         |timestamp| {
             timestamp
                 .to_zoned(jiff::tz::TimeZone::system())
-                .strftime("%H:%M")
+                .strftime(format)
                 .to_string()
         },
     )

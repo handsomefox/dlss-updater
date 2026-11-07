@@ -461,10 +461,7 @@ fn review_row_list(ui: &mut egui::Ui, review: &mut ReviewState) {
             // Strong text takes its color from the widget style, which the
             // checkbox scope darkens for the check mark; name the color.
             let name = egui::RichText::new(&rows[0].game_name)
-                .font(egui::FontId::new(
-                    14.0,
-                    egui::FontFamily::Name("semibold".into()),
-                ))
+                .font(theme::semibold_font(14.0))
                 .color(theme::TEXT);
             if widgets::tri_checkbox(ui, state, name, "Select or clear this game's changes") {
                 let select = state != TriState::All;

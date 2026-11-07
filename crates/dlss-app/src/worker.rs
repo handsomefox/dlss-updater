@@ -604,7 +604,7 @@ fn import_dll(_path: &std::path::Path) -> WorkerResult<dlss_core::ImportedDllRec
     ))
 }
 
-fn canonicalize_roots(roots: &mut Vec<PathBuf>) {
+pub(crate) fn canonicalize_roots(roots: &mut Vec<PathBuf>) {
     let mut normalized = Vec::with_capacity(roots.len());
     for root in roots.drain(..) {
         let root = root.canonicalize().unwrap_or(root);
