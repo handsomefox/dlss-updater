@@ -545,7 +545,10 @@ pub fn read_versioned_json_bytes<T: DeserializeOwned>(
     Ok(envelope.payload)
 }
 
-fn hex_hash(hash: [u8; 32]) -> String {
+/// A SHA-256 as 64 lowercase hex digits, the form object stores and the
+/// elevated helper's arguments use.
+#[must_use]
+pub fn hex_hash(hash: [u8; 32]) -> String {
     use std::fmt::Write as _;
     let mut encoded = String::with_capacity(64);
     for byte in hash {

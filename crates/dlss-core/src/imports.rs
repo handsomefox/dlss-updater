@@ -1,6 +1,6 @@
 use crate::{
     CatalogDll, CoreError, DllInspector, DllKind, DllVersion, ReleaseId, SignatureStatus,
-    TrustPolicy, TrustVerifier, copy_flush_hash, hash_file, read_versioned_json,
+    TrustPolicy, TrustVerifier, copy_flush_hash, hash_file, hex_hash, read_versioned_json,
     write_versioned_json,
 };
 use serde::{Deserialize, Serialize};
@@ -231,15 +231,6 @@ pub fn imported_catalog_dlls(index: &ImportIndex) -> Vec<CatalogDll> {
             release: imported_release_id(record.sha256),
         })
         .collect()
-}
-
-fn hex_hash(hash: [u8; 32]) -> String {
-    use std::fmt::Write as _;
-    let mut encoded = String::with_capacity(64);
-    for byte in hash {
-        let _ = write!(encoded, "{byte:02x}");
-    }
-    encoded
 }
 
 #[cfg(test)]

@@ -9,8 +9,8 @@ use dlss_core::{
     RegistryValueSnapshot, RegistryView, RevocationStatus, SignatureStatus, StoreDiscoveryReport,
     StoreKind, SystemToolDefinition, SystemToolId, SystemToolProvider, SystemToolScope,
     SystemToolState, ToolChangePlan, ToolChangeResult, ToolRestorePoint, TrustPolicy, TrustReport,
-    TrustVerifier, execute_plan, hash_file, indicator_state, now_unix, read_versioned_json_bytes,
-    write_versioned_json,
+    TrustVerifier, execute_plan, hash_file, hex_hash, indicator_state, now_unix,
+    read_versioned_json_bytes, write_versioned_json,
 };
 use object::Object;
 use sha2::{Digest, Sha256};
@@ -75,15 +75,6 @@ pub fn capabilities() -> PlatformCapabilities {
 
 fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
-}
-
-fn hex_hash(hash: [u8; 32]) -> String {
-    use std::fmt::Write as _;
-    let mut encoded = String::with_capacity(64);
-    for byte in hash {
-        write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    encoded
 }
 
 fn windows_error(error: &windows::core::Error) -> CoreError {
