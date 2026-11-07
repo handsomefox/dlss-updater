@@ -311,7 +311,7 @@ impl DlssApp {
                     });
                     row.col(|ui| comparison_cell(ui, comparison, dlss1));
                     row.col(|ui| signature_cell(ui, dll.metadata.signature));
-                    row.col(|ui| self.desired_target_combo(ui, dll));
+                    row.col(|ui| self.desired_target_combo(ui, dll, &latest));
                 });
             });
     }
@@ -320,13 +320,17 @@ impl DlssApp {
         clippy::too_many_lines,
         reason = "the selector builds official, imported, and backup choices in one widget"
     )]
-    fn desired_target_combo(&mut self, ui: &mut egui::Ui, dll: &dlss_core::DllInstallation) {
+    fn desired_target_combo(
+        &mut self,
+        ui: &mut egui::Ui,
+        dll: &dlss_core::DllInstallation,
+        latest: &[dlss_core::CatalogDll],
+    ) {
         // Restores stay on offer: they put back what the game shipped with.
         let fits = |version: dlss_core::DllVersion| {
             !dlss_core::crosses_dlss_generation(&dll.file_name, dll.metadata.version, Some(version))
         };
-        let latest_fits = self
-            .latest_catalog()
+        let latest_fits = latest
             .iter()
             .filter(|candidate| dlss_core::same_file_name(&candidate.file_name, &dll.file_name))
             .all(|candidate| fits(candidate.version));
@@ -415,8 +419,7 @@ impl DlssApp {
                     .iter()
                     .find(|(target, _)| target == &desired)
                     .map_or_else(|| desired_label(&desired), |(_, label)| label.clone()),
-                dlss_core::DesiredDll::LatestOfficial => self
-                    .latest_catalog()
+                dlss_core::DesiredDll::LatestOfficial => latest
                     .iter()
                     .filter(|candidate| {
                         dlss_core::same_file_name(&candidate.file_name, &dll.file_name)

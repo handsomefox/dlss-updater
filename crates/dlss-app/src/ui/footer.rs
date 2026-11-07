@@ -83,11 +83,12 @@ impl DlssApp {
     }
 
     fn selection_actions(&mut self, ui: &mut egui::Ui, selected: Vec<dlss_core::GameId>) {
-        let visible = self.filtered_game_rows();
-        let hidden = selected
-            .iter()
-            .filter(|id| !visible.iter().any(|&index| &self.games[index].id == *id))
-            .count();
+        let visible: std::collections::HashSet<_> = self
+            .filtered_game_rows()
+            .into_iter()
+            .map(|index| &self.games[index].id)
+            .collect();
+        let hidden = selected.iter().filter(|id| !visible.contains(id)).count();
         ui.label(
             egui::RichText::new(format!("{} selected", plural(selected.len(), "game"))).strong(),
         );
