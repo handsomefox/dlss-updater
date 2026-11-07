@@ -399,35 +399,6 @@ pub struct OperationPlan {
     pub swaps: Vec<PlannedSwap>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct PlanSummary {
-    pub games: usize,
-    pub dlls: usize,
-    pub upgrades: usize,
-    pub downgrades: usize,
-}
-
-impl OperationPlan {
-    #[must_use]
-    pub fn summary(&self) -> PlanSummary {
-        let games: std::collections::HashSet<_> =
-            self.swaps.iter().map(|swap| &swap.game).collect();
-        let mut s = PlanSummary {
-            games: games.len(),
-            dlls: self.swaps.len(),
-            ..Default::default()
-        };
-        for swap in &self.swaps {
-            match swap.comparison {
-                Comparison::Upgrade => s.upgrades += 1,
-                Comparison::Downgrade => s.downgrades += 1,
-                _ => {}
-            }
-        }
-        s
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SwapResult {
     pub installation: DllInstallationId,

@@ -82,18 +82,6 @@ fn plan_filtered_upgrades(
     }
 }
 
-#[must_use]
-pub fn plan_touches_streamline(plans: &[OperationPlan]) -> bool {
-    plans.iter().any(|plan| {
-        plan.swaps.iter().any(|swap| {
-            swap.target_path
-                .file_name()
-                .and_then(crate::DllKind::classify)
-                == Some(crate::DllKind::Streamline)
-        })
-    })
-}
-
 /// Resolves an advanced per-installation profile into immutable file swaps.
 /// Unlike the one-click planner, this deliberately permits downgrades,
 /// different builds with the same numeric version, and restore points.
@@ -290,20 +278,6 @@ impl BackupStore {
         } else {
             Ok(BackupIndex::default())
         }
-    }
-
-    /// Loads the backup index and validates every content-addressed object.
-    ///
-    /// # Errors
-    /// Returns an error when an entry escapes the object store or its hash or
-    /// recorded PE version no longer matches the stored object.
-    pub fn load_validated_index(
-        &self,
-        inspector: &dyn DllInspector,
-    ) -> Result<BackupIndex, CoreError> {
-        Ok(BackupIndex {
-            records: self.load_validated_report(inspector)?.usable,
-        })
     }
 
     /// Loads and independently validates every backup object.
@@ -742,8 +716,12 @@ mod tests {
                 .is_some_and(crate::DllKind::is_dlss_family)
         }));
         let all = plan_strict_upgrades("n", &installed, &latest);
-        assert!(plan_touches_streamline(&[all]));
-        assert!(!plan_touches_streamline(&[plan]));
+        assert!(all.swaps.iter().any(|swap| {
+            swap.target_path
+                .file_name()
+                .and_then(crate::DllKind::classify)
+                == Some(crate::DllKind::Streamline)
+        }));
         let streamline_only = plan_dlss_only_upgrades("n", &installed[2..], &latest[2..]);
         assert!(streamline_only.swaps.is_empty());
     }

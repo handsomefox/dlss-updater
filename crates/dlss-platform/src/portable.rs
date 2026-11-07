@@ -1,7 +1,4 @@
-use dlss_core::{
-    CoreError, DllInspector, DllMetadata, DllVersion, RevocationStatus, SignatureStatus,
-    TrustPolicy, TrustReport, TrustVerifier,
-};
+use dlss_core::{CoreError, DllInspector, DllMetadata, DllVersion, SignatureStatus};
 use object::{Object, ObjectKind};
 use sha2::{Digest, Sha256};
 use std::{fs::File, io::Read, path::Path};
@@ -29,16 +26,4 @@ impl DllInspector for PortablePeInspector {
 // PE version-resource parsing belongs to the Windows adapter. Keeping Unknown is safer than timestamps/strings.
 fn portable_file_version(_object: &object::File<'_>) -> Option<DllVersion> {
     None
-}
-
-pub struct UnavailableTrustVerifier;
-impl TrustVerifier for UnavailableTrustVerifier {
-    fn verify(&self, _path: &Path, _policy: TrustPolicy) -> Result<TrustReport, CoreError> {
-        Ok(TrustReport {
-            signature: SignatureStatus::Unavailable,
-            signer: None,
-            revocation: RevocationStatus::NotVerified,
-            native_failure: None,
-        })
-    }
 }

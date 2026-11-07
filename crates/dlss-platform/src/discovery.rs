@@ -221,11 +221,6 @@ pub fn steam_steamapps_dirs(steam_root: &Path) -> (Vec<PathBuf>, Option<String>)
     (deduplicate_steam_roots(roots), detail)
 }
 
-#[must_use]
-pub fn steam_manifests(steamapps: &Path) -> Vec<(String, String, PathBuf)> {
-    steam_manifests_with_errors(steamapps).items
-}
-
 pub struct ManifestScan<T> {
     pub items: Vec<T>,
     pub errors: Vec<String>,
@@ -357,11 +352,6 @@ struct EpicManifest {
 }
 
 /// Reads Epic `.item` manifests. A malformed entry never hides valid siblings.
-#[must_use]
-pub fn epic_manifests(directory: &Path) -> Vec<GameInstall> {
-    epic_manifests_with_errors(directory).items
-}
-
 #[must_use]
 pub fn epic_manifests_with_errors(directory: &Path) -> ManifestScan<GameInstall> {
     let entries = match fs::read_dir(directory) {
@@ -560,13 +550,11 @@ mod tests {
             r#"{"DisplayName":"Unicode 游戏","InstallLocation":"D:\\Epic\\Game","CatalogItemId":"catalog-id","AppName":"game"}"#,
         )
         .unwrap();
-        let games = epic_manifests(directory.path());
-        assert_eq!(games.len(), 1);
-        assert_eq!(games[0].id.0, "epic:catalog-id");
-        assert_eq!(games[0].name, "Unicode 游戏");
-        let diagnostic = epic_manifests_with_errors(directory.path());
-        assert_eq!(diagnostic.items.len(), 1);
-        assert_eq!(diagnostic.errors.len(), 1);
+        let scan = epic_manifests_with_errors(directory.path());
+        assert_eq!(scan.items.len(), 1);
+        assert_eq!(scan.items[0].id.0, "epic:catalog-id");
+        assert_eq!(scan.items[0].name, "Unicode 游戏");
+        assert_eq!(scan.errors.len(), 1);
     }
 
     #[test]
