@@ -554,9 +554,45 @@ fn hex_hash(hash: [u8; 32]) -> String {
     encoded
 }
 
+/// Parses a SHA-256 written as exactly 64 hex digits, in either case.
+///
+/// Anything else is rejected, including a sign before a digit pair, which
+/// `u8::from_str_radix` would accept, and non-ASCII text, which would split a
+/// character when sliced into pairs.
+#[must_use]
+pub fn parse_sha256_hex(text: &str) -> Option<[u8; 32]> {
+    let digits = text.as_bytes();
+    if digits.len() != 64 || !digits.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    let (pairs, []) = digits.as_chunks::<2>() else {
+        return None;
+    };
+    let mut hash = [0_u8; 32];
+    for (byte, pair) in hash.iter_mut().zip(pairs) {
+        let pair = std::str::from_utf8(pair).ok()?;
+        *byte = u8::from_str_radix(pair, 16).ok()?;
+    }
+    Some(hash)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_hex_accepts_only_64_hex_digits() {
+        let hash: [u8; 32] = std::array::from_fn(|index| u8::try_from(index * 7).unwrap());
+        let encoded = hex_hash(hash);
+        assert_eq!(parse_sha256_hex(&encoded), Some(hash));
+        assert_eq!(parse_sha256_hex(&encoded.to_uppercase()), Some(hash));
+        assert_eq!(parse_sha256_hex(&encoded[..62]), None);
+        assert_eq!(parse_sha256_hex(&format!("{encoded}00")), None);
+        assert_eq!(parse_sha256_hex(&"+f".repeat(32)), None);
+        assert_eq!(parse_sha256_hex(&"g0".repeat(32)), None);
+        // 64 bytes, but a two-byte character straddles a digit pair.
+        assert_eq!(parse_sha256_hex(&format!("a{}", "é".repeat(31))), None);
+    }
     use crate::{
         DllInstallationId, DllMetadata, DllVersion, GameId, ReleaseId, RevocationStatus,
         SignatureStatus, TrustReport,

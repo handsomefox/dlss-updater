@@ -74,7 +74,10 @@ fn elevated_helper() {
             tracing::error!("missing elevated helper plan");
             std::process::exit(2);
         };
-        let Some(plan_hash) = arguments.next().and_then(|value| parse_sha256(&value)) else {
+        let Some(plan_hash) = arguments
+            .next()
+            .and_then(|value| value.to_str().and_then(dlss_core::parse_sha256_hex))
+        else {
             tracing::error!("missing or invalid elevated helper plan digest");
             std::process::exit(2);
         };
@@ -90,19 +93,6 @@ fn elevated_helper() {
     }
     #[cfg(not(windows))]
     tracing::warn!("elevated helper is unavailable on this platform");
-}
-
-#[cfg(windows)]
-fn parse_sha256(value: &std::ffi::OsStr) -> Option<[u8; 32]> {
-    let value = value.to_str()?;
-    if value.len() != 64 {
-        return None;
-    }
-    let mut hash = [0_u8; 32];
-    for (index, byte) in hash.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    Some(hash)
 }
 
 struct DlssApp {
