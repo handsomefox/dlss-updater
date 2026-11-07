@@ -89,12 +89,9 @@ impl ImportStore {
         fs::create_dir_all(&objects)?;
         let content_path = objects.join(hex_hash(sha256));
         if !content_path.exists() {
-            let temporary = objects.join(format!(".import-{}.partial", hex_hash(sha256)));
-            if temporary.exists() {
-                fs::remove_file(&temporary)?;
-            }
-            copy_flush_hash(source, &temporary, sha256)?;
-            fs::rename(&temporary, &content_path)?;
+            // The copy commits only once its hash matches, so the object
+            // path never holds partial or unexpected bytes.
+            copy_flush_hash(source, &content_path, sha256)?;
         }
         let stored_metadata = inspector.inspect(&content_path)?;
         if !stored_metadata.x86_64 || stored_metadata.sha256 != sha256 {
