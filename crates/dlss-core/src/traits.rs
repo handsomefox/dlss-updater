@@ -23,8 +23,6 @@ pub struct PlatformCapabilities {
 pub enum CoreError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("unsupported capability: {0}")]
-    Unsupported(&'static str),
     #[error("stale operation plan")]
     StalePlan,
     #[error("validation failed: {0}")]

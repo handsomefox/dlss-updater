@@ -49,8 +49,6 @@ pub enum GithubError {
     DigestMismatch,
     #[error("download size mismatch: expected {expected} bytes, received {actual} bytes")]
     SizeMismatch { expected: u64, actual: u64 },
-    #[error("invalid SHA-256 digest")]
-    InvalidDigest,
     #[error("too many GitHub release pages")]
     TooManyPages,
     #[error("release asset URL is outside the official NVIDIA-RTX/Streamline download path")]

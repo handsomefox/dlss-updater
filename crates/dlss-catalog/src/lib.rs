@@ -205,8 +205,6 @@ pub enum CatalogError {
     DuplicateEntry(String),
     #[error("candidate is not a valid x86-64 PE DLL: {0}")]
     InvalidPe(String),
-    #[error("candidate is not Authenticode trusted: {0}")]
-    Untrusted(String),
     #[error("inspection failed for {0}: {1}")]
     Inspection(String, String),
     #[error("archive contains no immediate production x86-64 DLLs")]
