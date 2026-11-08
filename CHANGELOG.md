@@ -2,6 +2,14 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.4.7
+
+- Find the data folder the same way in **About** and in the background work. **Open data folder**
+  read `%LOCALAPPDATA%` from the environment, which can differ from the folder the backups are in.
+- Log a crash with its backtrace before the app closes.
+- Get the self-updater, the update window, logging, and the folder lookups from [handsomefox/app-internals](https://github.com/handsomefox/app-internals),
+  which all five apps share, instead of a copy inside this app.
+
 ## 1.4.6
 
 - Line up icons, tab counts, and the search box with the text and controls beside them, and even
