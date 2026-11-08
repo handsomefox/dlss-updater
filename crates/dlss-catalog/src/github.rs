@@ -49,8 +49,12 @@ pub enum GithubError {
     DigestMismatch,
     #[error("download size mismatch: expected {expected} bytes, received {actual} bytes")]
     SizeMismatch { expected: u64, actual: u64 },
-    #[error("GitHub listed {asset} with a malformed SHA-256 digest: {digest}")]
-    InvalidDigest { asset: String, digest: String },
+    #[error("GitHub listed {asset} in {release} with a malformed SHA-256 digest: {digest}")]
+    InvalidDigest {
+        release: String,
+        asset: String,
+        digest: String,
+    },
     #[error("too many GitHub release pages")]
     TooManyPages,
     #[error("release asset URL is outside the official NVIDIA-RTX/Streamline download path")]
@@ -145,9 +149,7 @@ impl GithubCatalogClient {
                 .and_then(|value| value.to_str().ok())
                 .and_then(next_link);
             let releases: Vec<ApiRelease> = response.json()?;
-            for release in releases {
-                assets.extend(select_asset(release)?);
-            }
+            assets.extend(select_assets(releases));
         }
         assets.sort_by(|left, right| {
             (right.release.published_unix, &right.release.tag)
@@ -299,6 +301,23 @@ struct ApiAsset {
     digest: Option<String>,
 }
 
+/// Picks each release's x86-64 desktop archive. A release whose archive
+/// carries a malformed digest is left out, so it can never download without
+/// the check GitHub offered, while every other release stays usable.
+fn select_assets(releases: Vec<ApiRelease>) -> Vec<OfficialAsset> {
+    releases
+        .into_iter()
+        .filter_map(|release| {
+            select_asset(release)
+                .inspect_err(|error| {
+                    tracing::warn!(%error, "leaving a release with a malformed digest out of the catalog");
+                })
+                .ok()
+                .flatten()
+        })
+        .collect()
+}
+
 /// Picks the x86-64 desktop archive out of one release.
 ///
 /// Since v2.14.1 a release also carries `-aarch64` and `-arm64ec` archives,
@@ -310,8 +329,7 @@ struct ApiAsset {
 /// downloading the wrong architecture.
 ///
 /// # Errors
-/// Returns an error when the archive's digest is present but malformed, so
-/// nothing downloads without the digest check GitHub offered.
+/// Returns an error when the archive's digest is present but malformed.
 fn select_asset(release: ApiRelease) -> Result<Option<OfficialAsset>, GithubError> {
     if release.draft || release.prerelease {
         return Ok(None);
@@ -331,6 +349,7 @@ fn select_asset(release: ApiRelease) -> Result<Option<OfficialAsset>, GithubErro
         None | Some("") => None,
         Some(value) => Some(
             parse_digest(value).ok_or_else(|| GithubError::InvalidDigest {
+                release: release.tag_name.clone(),
                 asset: asset.name.clone(),
                 digest: value.to_owned(),
             })?,
@@ -472,6 +491,19 @@ mod tests {
                 "{malformed}"
             );
         }
+    }
+
+    #[test]
+    fn a_malformed_digest_drops_only_its_own_release() {
+        let mut bad = arch_release(&[("streamline-sdk-v2.14.1.zip", "bad")]);
+        bad.assets[0].digest = Some("sha256:not-hex".into());
+        let mut good = arch_release(&[("streamline-sdk-v2.14.0.zip", "good")]);
+        good.tag_name = "v2.14.0".into();
+        let urls: Vec<_> = select_assets(vec![bad, good])
+            .into_iter()
+            .map(|asset| asset.download_url)
+            .collect();
+        assert_eq!(urls, ["good"]);
     }
 
     #[test]
