@@ -123,13 +123,10 @@ struct DlssApp {
     backups: Vec<dlss_core::BackupRecord>,
     backup_warning: Option<String>,
     backups_loading: bool,
-    /// The game the worker is changing right now.
-    upgrading: Option<dlss_core::GameId>,
     toast: Option<Toast>,
-    /// The update or undo the user started, counted until every game in it
-    /// reports back, so a bulk run ends in one summary instead of a notice
-    /// per game.
-    batch: Option<Batch>,
+    /// The update or undo the user started, until every game in it reports
+    /// back.
+    run: Option<Run>,
     /// Games whose last change the worker can still undo.
     undoable: std::collections::HashSet<dlss_core::GameId>,
     /// The undoable games from the most recent finished update, which the
@@ -139,11 +136,6 @@ struct DlssApp {
     /// starts. An id rather than a row, because sorting moves rows.
     selection_anchor: Option<dlss_core::GameId>,
     review: Option<ui::review::ReviewState>,
-    /// Games with a queued or running update or undo. Updates map to the DLL
-    /// installation ids that were sent, so exactly those staged targets can
-    /// be cleared when the operation finishes; undos map to an empty list.
-    profiles_applying:
-        std::collections::HashMap<dlss_core::GameId, Vec<dlss_core::DllInstallationId>>,
     #[cfg(windows)]
     tool_runtime: WindowsToolRuntime,
     updater: app_update::Updater,
@@ -163,6 +155,26 @@ enum AppWindow {
 enum View {
     Library,
     Game(dlss_core::GameId),
+}
+
+/// An update or undo the user started, one game at a time in the worker.
+struct Run {
+    /// Counted until every game reports back, so a bulk run ends in one
+    /// summary instead of a notice per game.
+    batch: Batch,
+    /// Games still queued or running. Updates map to the DLL installation
+    /// ids that were sent, so exactly those staged targets can be cleared
+    /// when the game finishes; undos map to an empty list.
+    pending: std::collections::HashMap<dlss_core::GameId, Vec<dlss_core::DllInstallationId>>,
+    /// The game the worker is changing right now.
+    current: Option<dlss_core::GameId>,
+}
+
+/// What the worker is doing with a game in the current run.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum GameActivity {
+    Running,
+    Queued,
 }
 
 /// A release download the user started. Progress belongs to this release
@@ -345,14 +357,12 @@ impl DlssApp {
             backups: Vec::new(),
             backup_warning: None,
             backups_loading: true,
-            upgrading: None,
             toast: None,
-            batch: None,
+            run: None,
             undoable: std::collections::HashSet::new(),
             last_change: Vec::new(),
             selection_anchor: None,
             review: None,
-            profiles_applying: std::collections::HashMap::new(),
             #[cfg(windows)]
             tool_runtime: WindowsToolRuntime::default(),
             updater: app_update::Updater::new(APP_INFO, {
@@ -378,9 +388,7 @@ impl DlssApp {
                         self.runtime.catalog_loading = false;
                         self.backups_loading = false;
                         self.release_download = None;
-                        self.upgrading = None;
-                        self.profiles_applying.clear();
-                        self.batch = None;
+                        self.run = None;
                         self.toast = None;
                         self.last_error = Some("Background worker stopped unexpectedly".into());
                     }
@@ -632,7 +640,7 @@ impl DlssApp {
     fn handle_upgrade_started(&mut self, game_id: dlss_core::GameId) {
         self.undoable.remove(&game_id);
         let name = self.game_name(&game_id);
-        let message = match &self.batch {
+        let message = match self.run.as_ref().map(|run| &run.batch) {
             Some(batch) if batch.total > 1 => format!(
                 "{} {name} ({} of {})…",
                 batch.kind.verb_ing(),
@@ -642,7 +650,9 @@ impl DlssApp {
             Some(batch) => format!("{} {name}…", batch.kind.verb_ing()),
             None => format!("Updating {name}…"),
         };
-        self.upgrading = Some(game_id);
+        if let Some(run) = &mut self.run {
+            run.current = Some(game_id);
+        }
         self.notify(ToastKind::Progress, message);
     }
 
@@ -652,8 +662,10 @@ impl DlssApp {
         game: Option<dlss_core::GameInstall>,
         result: Result<worker::UpgradeReport, worker::WorkerError>,
     ) {
-        self.upgrading = None;
-        let applying_profile = self.profiles_applying.remove(game_id);
+        let applying_profile = self.run.as_mut().and_then(|run| {
+            run.current = None;
+            run.pending.remove(game_id)
+        });
         if let Some(game) = game
             && let Some(index) = self.games.iter().position(|row| &row.id == game_id)
         {
@@ -666,12 +678,12 @@ impl DlssApp {
             Err(error) => {
                 let name = self.game_name(game_id);
                 self.last_error = Some(format!("{name}: {error}"));
-                if let Some(batch) = &mut self.batch {
+                if let Some(batch) = self.batch_mut() {
                     batch.failed_games += 1;
                 }
             }
         }
-        if let Some(batch) = &mut self.batch {
+        if let Some(batch) = self.batch_mut() {
             batch.done += 1;
         }
         self.refresh_upgrade_counts();
@@ -700,7 +712,7 @@ impl DlssApp {
         if report.can_undo {
             self.undoable.insert(game_id.clone());
         }
-        if let Some(batch) = &mut self.batch {
+        if let Some(batch) = self.batch_mut() {
             batch.changed += report.changed;
             batch.failed += report.failed;
             if report.changed > 0 {
@@ -729,28 +741,42 @@ impl DlssApp {
         }
     }
 
-    /// Starts counting a run of updates or undos, one per game, so progress
-    /// and the final summary cover the whole run.
-    fn start_batch(&mut self, kind: BatchKind, games: &[dlss_core::GameId]) {
+    /// Starts a run of updates or undos, one per game in `pending`, so
+    /// progress and the final summary cover the whole run. `games` keeps the
+    /// order the user's games came in.
+    fn start_run(
+        &mut self,
+        kind: BatchKind,
+        games: &[dlss_core::GameId],
+        pending: std::collections::HashMap<dlss_core::GameId, Vec<dlss_core::DllInstallationId>>,
+    ) {
         let single_name = (games.len() == 1).then(|| self.game_name(&games[0]));
         let message = match &single_name {
             Some(name) => format!("{} {name}…", kind.verb_ing()),
             None => format!("{} {} games…", kind.verb_ing(), games.len()),
         };
         self.last_change.clear();
-        self.batch = Some(Batch::new(kind, games.len(), single_name));
+        self.run = Some(Run {
+            batch: Batch::new(kind, games.len(), single_name),
+            pending,
+            current: None,
+        });
         self.notify(ToastKind::Progress, message);
+    }
+
+    fn batch_mut(&mut self) -> Option<&mut Batch> {
+        self.run.as_mut().map(|run| &mut run.batch)
     }
 
     fn finish_batch_if_done(&mut self) {
         if self
-            .batch
+            .run
             .as_ref()
-            .is_some_and(|batch| batch.done < batch.total)
+            .is_some_and(|run| run.batch.done < run.batch.total)
         {
             return;
         }
-        let Some(batch) = self.batch.take() else {
+        let Some(Run { batch, .. }) = self.run.take() else {
             self.toast = None;
             return;
         };
@@ -773,14 +799,14 @@ impl DlssApp {
         }
         let games: Vec<_> = games
             .into_iter()
-            .filter(|id| self.undoable.contains(id) && !self.profiles_applying.contains_key(id))
+            .filter(|id| self.undoable.contains(id))
             .collect();
         if games.is_empty() {
             return;
         }
-        self.start_batch(BatchKind::Undo, &games);
+        let pending = games.iter().map(|id| (id.clone(), Vec::new())).collect();
+        self.start_run(BatchKind::Undo, &games, pending);
         for game_id in games {
-            self.profiles_applying.insert(game_id.clone(), Vec::new());
             let _ = self.worker.commands.send(Command::UndoLast(game_id));
         }
     }
@@ -801,11 +827,23 @@ impl DlssApp {
             .map_or_else(|| "the game".into(), |game| game.name.clone())
     }
 
-    /// True while any update or undo is queued or running. The worker runs
-    /// them one at a time, so between two games of a bulk run `upgrading` is
-    /// briefly empty; checking the queue too keeps buttons from flickering.
+    /// True while any update or undo is queued or running. The run lasts
+    /// from the click until its last game reports back, so buttons do not
+    /// flicker between two games of a bulk run.
     fn busy(&self) -> bool {
-        self.upgrading.is_some() || !self.profiles_applying.is_empty()
+        self.run.is_some()
+    }
+
+    /// Whether the current run is changing this game now or has it queued.
+    fn game_activity(&self, game_id: &dlss_core::GameId) -> Option<GameActivity> {
+        let run = self.run.as_ref()?;
+        if run.current.as_ref() == Some(game_id) {
+            Some(GameActivity::Running)
+        } else if run.pending.contains_key(game_id) {
+            Some(GameActivity::Queued)
+        } else {
+            None
+        }
     }
 
     #[cfg(windows)]

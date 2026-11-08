@@ -317,17 +317,16 @@ impl DlssApp {
                 .targets
                 .insert(row.dll_id.clone(), row.desired.clone());
         }
-        let per_game_ids: Vec<_> = per_game.keys().cloned().collect();
+        let games: Vec<_> = per_game.keys().cloned().collect();
+        let mut pending = std::collections::HashMap::new();
         for (game_id, profile) in per_game {
-            self.profiles_applying
-                .insert(game_id.clone(), profile.targets.keys().cloned().collect());
+            pending.insert(game_id.clone(), profile.targets.keys().cloned().collect());
             let _ = self
                 .worker
                 .commands
                 .send(Command::ApplyProfile(game_id, profile));
         }
-        let games: Vec<_> = per_game_ids;
-        self.start_batch(crate::BatchKind::Update, &games);
+        self.start_run(crate::BatchKind::Update, &games, pending);
     }
 }
 

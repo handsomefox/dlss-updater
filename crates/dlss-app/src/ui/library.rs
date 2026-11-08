@@ -7,7 +7,8 @@ use super::toast::plural;
 use super::widgets::{self, TriState};
 use crate::ui::review::ReviewIntent;
 use crate::{
-    Command, DlssApp, GameFilter, GameRow, GameSort, ReleaseDownload, SortKey, StoreFilter, View,
+    Command, DlssApp, GameActivity, GameFilter, GameRow, GameSort, ReleaseDownload, SortKey,
+    StoreFilter, View,
 };
 use eframe::egui;
 
@@ -349,13 +350,7 @@ impl DlssApp {
                         }
                     });
                     row.col(|ui| {
-                        let activity = if self.upgrading.as_ref() == Some(&game.id) {
-                            Some(true)
-                        } else if self.profiles_applying.contains_key(&game.id) {
-                            Some(false)
-                        } else {
-                            None
-                        };
+                        let activity = self.game_activity(&game.id);
                         let status = row_status(game, latest_ready);
                         if status_cell(ui, game, status, activity, can_update, busy) {
                             requests.review = Some(ReviewIntent::QuickDlss(vec![game.id.clone()]));
@@ -653,24 +648,21 @@ pub(crate) const DLSS1_EXPLANATION: &str = "This game uses DLSS 1. DLSS 2 and la
      differently and turn DLSS off in a DLSS 1 game, so its DLSS DLL stays as it is.";
 
 /// Draws the status column. Returns true when the Update button was clicked.
-///
-/// `activity` is `Some(true)` while the worker changes this game, and
-/// `Some(false)` while the game waits its turn.
 fn status_cell(
     ui: &mut egui::Ui,
     game: &GameRow,
     status: RowStatus,
-    activity: Option<bool>,
+    activity: Option<GameActivity>,
     can_update: bool,
     busy: bool,
 ) -> bool {
     match activity {
-        Some(true) => {
+        Some(GameActivity::Running) => {
             ui.spinner();
             ui.label("Updating…");
             return false;
         }
-        Some(false) => {
+        Some(GameActivity::Queued) => {
             widgets::status_text(ui, icons::HOURGLASS, "Queued", theme::TEXT_MUTED);
             return false;
         }

@@ -175,8 +175,7 @@ impl DlssApp {
         requested_review: &mut Option<ReviewIntent>,
     ) {
         let game = &self.games[index];
-        let in_flight = self.upgrading.as_ref() == Some(&game.id)
-            || self.profiles_applying.contains_key(&game.id);
+        let in_flight = self.game_activity(&game.id).is_some();
         let can_update = self.catalog_release.is_some() && game.dlls > 0 && !self.busy();
         if in_flight {
             ui.label("Updating…");
