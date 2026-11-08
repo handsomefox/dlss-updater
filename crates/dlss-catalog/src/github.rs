@@ -49,6 +49,8 @@ pub enum GithubError {
     DigestMismatch,
     #[error("download size mismatch: expected {expected} bytes, received {actual} bytes")]
     SizeMismatch { expected: u64, actual: u64 },
+    #[error("GitHub listed {asset} with a malformed SHA-256 digest: {digest}")]
+    InvalidDigest { asset: String, digest: String },
     #[error("too many GitHub release pages")]
     TooManyPages,
     #[error("release asset URL is outside the official NVIDIA-RTX/Streamline download path")]
@@ -143,7 +145,9 @@ impl GithubCatalogClient {
                 .and_then(|value| value.to_str().ok())
                 .and_then(next_link);
             let releases: Vec<ApiRelease> = response.json()?;
-            assets.extend(releases.into_iter().filter_map(select_asset));
+            for release in releases {
+                assets.extend(select_asset(release)?);
+            }
         }
         assets.sort_by(|left, right| {
             (right.release.published_unix, &right.release.tag)
@@ -304,20 +308,35 @@ struct ApiAsset {
 /// architecture-suffixed archive can satisfy. If NVIDIA ever renames the
 /// x86-64 archive, the release disappears from the catalog instead of
 /// downloading the wrong architecture.
-fn select_asset(release: ApiRelease) -> Option<OfficialAsset> {
+///
+/// # Errors
+/// Returns an error when the archive's digest is present but malformed, so
+/// nothing downloads without the digest check GitHub offered.
+fn select_asset(release: ApiRelease) -> Result<Option<OfficialAsset>, GithubError> {
     if release.draft || release.prerelease {
-        return None;
+        return Ok(None);
     }
     let wanted = format!(
         "streamline-sdk-{}.zip",
         release.tag_name.to_ascii_lowercase()
     );
-    let asset = release
+    let Some(asset) = release
         .assets
         .into_iter()
-        .find(|asset| asset.name.to_ascii_lowercase() == wanted)?;
-    let digest = asset.digest.as_deref().and_then(parse_digest);
-    Some(OfficialAsset {
+        .find(|asset| asset.name.to_ascii_lowercase() == wanted)
+    else {
+        return Ok(None);
+    };
+    let digest = match asset.digest.as_deref() {
+        None | Some("") => None,
+        Some(value) => Some(
+            parse_digest(value).ok_or_else(|| GithubError::InvalidDigest {
+                asset: asset.name.clone(),
+                digest: value.to_owned(),
+            })?,
+        ),
+    };
+    Ok(Some(OfficialAsset {
         release: ReleaseMetadata {
             id: ReleaseId(release.tag_name.clone()),
             tag: release.tag_name,
@@ -331,19 +350,12 @@ fn select_asset(release: ApiRelease) -> Option<OfficialAsset> {
         download_url: asset.browser_download_url,
         size: asset.size,
         digest,
-    })
+    }))
 }
 
+/// Parses GitHub's `sha256:<64 hex digits>` asset digest.
 fn parse_digest(value: &str) -> Option<[u8; 32]> {
-    let value = value.strip_prefix("sha256:")?;
-    if value.len() != 64 {
-        return None;
-    }
-    let mut digest = [0_u8; 32];
-    for (index, output) in digest.iter_mut().enumerate() {
-        *output = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).ok()?;
-    }
-    Some(digest)
+    dlss_core::parse_sha256_hex(value.strip_prefix("sha256:")?)
 }
 
 fn next_link(header: &str) -> Option<String> {
@@ -429,6 +441,40 @@ mod tests {
     }
 
     #[test]
+    fn a_malformed_digest_fails_and_a_missing_one_stays_absent() {
+        let with_digest = |digest: Option<String>| {
+            let mut release = arch_release(&[("streamline-sdk-v2.14.1.zip", "x64")]);
+            release.assets[0].digest = digest;
+            select_asset(release)
+        };
+        let valid = format!("sha256:{}", "ab".repeat(32));
+        assert_eq!(
+            with_digest(Some(valid)).unwrap().unwrap().digest,
+            Some([0xab; 32])
+        );
+        assert_eq!(with_digest(None).unwrap().unwrap().digest, None);
+        assert_eq!(
+            with_digest(Some(String::new())).unwrap().unwrap().digest,
+            None
+        );
+        for malformed in [
+            "sha256:not-hex".to_owned(),
+            format!("sha256:{}", "+f".repeat(32)),
+            format!("sha512:{}", "ab".repeat(32)),
+            // 64 bytes, but a two-byte character straddles a digit pair.
+            format!("sha256:a{}", "é".repeat(31)),
+        ] {
+            assert!(
+                matches!(
+                    with_digest(Some(malformed.clone())),
+                    Err(GithubError::InvalidDigest { .. })
+                ),
+                "{malformed}"
+            );
+        }
+    }
+
+    #[test]
     fn follows_only_next_pagination_link() {
         let header =
             r#"<https://api.example/page/1>; rel="prev", <https://api.example/page/3>; rel="next""#;
@@ -460,7 +506,7 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(select_asset(release).unwrap().download_url, "good");
+        assert_eq!(select_asset(release).unwrap().unwrap().download_url, "good");
     }
 
     fn arch_release(assets: &[(&str, &str)]) -> ApiRelease {
@@ -488,7 +534,7 @@ mod tests {
             ("streamline-sdk-v2.14.1-arm64ec.zip", "armec"),
             ("streamline-sdk-v2.14.1.zip", "x64"),
         ]);
-        let selected = select_asset(release).unwrap();
+        let selected = select_asset(release).unwrap().unwrap();
         assert_eq!(selected.download_url, "x64");
         assert_eq!(selected.release.asset_name, "streamline-sdk-v2.14.1.zip");
     }
@@ -499,7 +545,7 @@ mod tests {
             ("streamline-sdk-v2.14.1-aarch64.zip", "arm"),
             ("streamline-sdk-v2.14.1-arm64ec.zip", "armec"),
         ]);
-        assert!(select_asset(release).is_none());
+        assert!(select_asset(release).unwrap().is_none());
     }
 
     #[test]
