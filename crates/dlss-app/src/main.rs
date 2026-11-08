@@ -1197,6 +1197,7 @@ impl DlssApp {
     /// when reporting a problem or inspecting what the app has stored.
     fn about_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::About);
+        let mut actions = Vec::new();
         widgets::modal(
             ctx,
             widgets::dialog("about", icons::INFO, "About DLSS Updater", 520.0),
@@ -1215,11 +1216,20 @@ impl DlssApp {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     if ui
-                        .button(widgets::icon_text(icons::ARROW_CIRCLE_UP, "App updates…"))
-                        .on_hover_text("Check for a new version and choose how often to check")
+                        .button(widgets::icon_text(
+                            icons::ARROW_CIRCLE_UP,
+                            "Check for updates",
+                        ))
+                        .on_hover_text(
+                            "Check GitHub for a new version now, and choose how often to check",
+                        )
                         .clicked()
                     {
-                        self.open_windows.insert(AppWindow::Update);
+                        // The label promises a check, so start one as the
+                        // dialog opens. The updater leaves a running check
+                        // or download alone.
+                        actions.push(Action::CheckAppUpdate);
+                        actions.push(Action::OpenWindow(AppWindow::Update));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         // Inset like the button's label on the left, so both
@@ -1273,6 +1283,7 @@ impl DlssApp {
             },
         );
         self.set_window_open(AppWindow::About, open);
+        self.apply_all(ctx, actions);
     }
 
     /// Stops scanning a folder the user added. Matches the stored path
