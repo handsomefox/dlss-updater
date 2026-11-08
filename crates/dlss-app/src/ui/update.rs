@@ -60,20 +60,13 @@ fn semibold(text: impl Into<String>, size: f32) -> egui::RichText {
     egui::RichText::new(text).font(theme::semibold_font(size))
 }
 
-fn update_body(
-    ui: &mut egui::Ui,
-    updater: &Updater,
-    settings: &Settings,
-    period: &mut CheckPeriod,
-    actions: &mut Vec<Action>,
-) {
-    let current = updater.current().map_or_else(
-        || APP_INFO.version.to_owned(),
-        |version| version.to_string(),
-    );
-    if let Some(update) = updater.update() {
-        available_update(ui, updater, settings, update, &current);
-    } else if updater.is_checking() {
+/// Space between the status band and the separator below it. A one-line
+/// status gets the same space above, to sit centered between separators.
+const STATUS_GAP: f32 = 6.0;
+
+/// Where the app stands when there is no update to offer.
+fn status_line(ui: &mut egui::Ui, updater: &Updater, current: &str) {
+    if updater.is_checking() {
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label("Checking GitHub for a new version…");
@@ -90,14 +83,37 @@ fn update_body(
             egui::RichText::new(format!("You have version {current}.")).color(theme::TEXT_MUTED),
         );
     }
+}
+
+fn update_body(
+    ui: &mut egui::Ui,
+    updater: &Updater,
+    settings: &Settings,
+    period: &mut CheckPeriod,
+    actions: &mut Vec<Action>,
+) {
+    let current = updater.current().map_or_else(
+        || APP_INFO.version.to_owned(),
+        |version| version.to_string(),
+    );
+    if let Some(update) = updater.update() {
+        available_update(ui, updater, settings, update, &current);
+    } else {
+        // A one-line status gets the air it has below, above it too, so it
+        // sits in the middle of the band between the two separators.
+        ui.add_space(STATUS_GAP);
+        status_line(ui, updater, &current);
+    }
     if let Some(error) = updater.error() {
         ui.add_space(8.0);
         widgets::banner(ui, theme::WARNING, icons::WARNING, error, false);
+        ui.add_space(widgets::FRAME_TO_SEPARATOR);
     }
 
-    ui.add_space(12.0);
+    ui.add_space(STATUS_GAP);
     ui.separator();
     widgets::section_title(ui, "Checking", None);
+    ui.add_space(widgets::TITLE_TO_BUTTONS);
     ui.horizontal(|ui| {
         ui.label("Check for new versions");
         egui::ComboBox::from_id_salt("app-update-period")
