@@ -41,7 +41,7 @@ pub enum GithubError {
     Http(#[from] reqwest::Error),
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("GitHub returned {status}: {message}")]
+    #[error("GitHub returned {status}{}", detail(.message))]
     Status { status: StatusCode, message: String },
     #[error("download exceeds safety limit")]
     TooLarge,
@@ -132,9 +132,7 @@ impl GithubCatalogClient {
                 return Ok(ReleaseRefresh::NotModified);
             }
             if !response.status().is_success() {
-                let status = response.status();
-                let message = response.text().unwrap_or_default();
-                return Err(GithubError::Status { status, message });
+                return Err(status_error(response));
             }
             if page == 1 {
                 etag = response
@@ -188,9 +186,7 @@ impl GithubCatalogClient {
             .header(USER_AGENT, "dlss-updater")
             .send()?;
         if !response.status().is_success() {
-            let status = response.status();
-            let message = response.text().unwrap_or_default();
-            return Err(GithubError::Status { status, message });
+            return Err(status_error(response));
         }
         let response_size = response.content_length();
         if let (Some(actual), true) = (response_size, asset.size > 0)
@@ -280,6 +276,32 @@ pub fn validate_cached_archive(asset: &OfficialAsset, path: &Path) -> Result<(),
         return Err(GithubError::DigestMismatch);
     }
     Ok(())
+}
+
+/// The error for a request GitHub refused. The API explains a refusal in a
+/// JSON `message`. Any other body, such as the HTML page GitHub serves during
+/// an outage, is left out, because the error is shown to the user.
+fn status_error(response: reqwest::blocking::Response) -> GithubError {
+    let status = response.status();
+    let message = response
+        .json::<ApiError>()
+        .map(|error| error.message.chars().take(200).collect())
+        .unwrap_or_default();
+    GithubError::Status { status, message }
+}
+
+/// The `: <message>` suffix of a status error, or nothing without a message.
+fn detail(message: &str) -> String {
+    if message.is_empty() {
+        String::new()
+    } else {
+        format!(": {message}")
+    }
+}
+
+#[derive(Deserialize)]
+struct ApiError {
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -491,6 +513,34 @@ mod tests {
                 "{malformed}"
             );
         }
+    }
+
+    #[test]
+    fn a_refused_request_reports_only_github_api_messages() {
+        let (base, _, server) = mock_server(|_| {
+            vec![
+                response(
+                    "504 Gateway Timeout",
+                    &[],
+                    b"<!DOCTYPE html>\n<html><head><title>Unicorn!</title></head></html>",
+                ),
+                response(
+                    "403 Forbidden",
+                    &[],
+                    br#"{"message":"API rate limit exceeded"}"#,
+                ),
+            ]
+        });
+        let client = GithubCatalogClient::with_releases_url(format!("{base}/releases")).unwrap();
+        assert_eq!(
+            client.refresh(None).unwrap_err().to_string(),
+            "GitHub returned 504 Gateway Timeout"
+        );
+        assert_eq!(
+            client.refresh(None).unwrap_err().to_string(),
+            "GitHub returned 403 Forbidden: API rate limit exceeded"
+        );
+        server.join().unwrap();
     }
 
     #[test]
