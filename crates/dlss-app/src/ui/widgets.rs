@@ -217,6 +217,12 @@ fn checkbox_scope<R>(ui: &mut egui::Ui, filled: bool, add: impl FnOnce(&mut egui
     ui.scope(|ui| {
         ui.spacing_mut().icon_width = 16.0;
         ui.spacing_mut().icon_width_inner = 9.0;
+        // egui's 4 pt left the label nearly touching the box or ring. Two
+        // labels in a row sit item_spacing.x apart; the box is drawn about a
+        // pixel past icon_width, which the extra 2 pt makes up for. egui adds
+        // the gap even for an empty label, so the table's checkboxes grow by
+        // it too; they still fit their 34 pt column.
+        ui.spacing_mut().icon_spacing = ui.spacing().item_spacing.x + 2.0;
         let widgets = &mut ui.visuals_mut().widgets;
         for (state, hovered) in [
             (&mut widgets.inactive, false),
@@ -295,17 +301,25 @@ pub(crate) fn section_title(
     action: Option<(egui::Button<'_>, &str, bool)>,
 ) -> bool {
     let mut clicked = false;
+    let title = egui::RichText::new(title).font(theme::semibold_font(15.5));
+    // A horizontal row is at least a button tall, so a bare title inside
+    // one would still be padded. Without a button it is a plain label.
+    let Some((button, hover, enabled)) = action else {
+        ui.label(title);
+        return false;
+    };
     ui.horizontal(|ui| {
-        ui.set_min_height(30.0);
-        ui.label(egui::RichText::new(title).font(theme::semibold_font(15.5)));
-        if let Some((button, hover, enabled)) = action {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                clicked = ui
-                    .add_enabled(enabled, button)
-                    .on_hover_text(hover)
-                    .clicked();
-            });
-        }
+        // egui centers each widget in the row height known when it is added,
+        // so reserve the button's height before the title, or the title sits
+        // at the top of the row.
+        ui.set_min_height(ui.spacing().interact_size.y);
+        ui.label(title);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            clicked = ui
+                .add_enabled(enabled, button)
+                .on_hover_text(hover)
+                .clicked();
+        });
     });
     clicked
 }
@@ -393,7 +407,7 @@ pub(crate) fn modal_with_actions<R>(
             ui.heading(dialog.title);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 close = ui
-                    .add(egui::Button::new(icon(icons::X, 13.0, theme::TEXT_MUTED)).frame(false))
+                    .add(egui::Button::new(icon(icons::X, 18.0, theme::TEXT_MUTED)).frame(false))
                     .on_hover_text("Close (Esc)")
                     .clicked();
             });
