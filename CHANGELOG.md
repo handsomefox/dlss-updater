@@ -2,6 +2,11 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.4.8
+
+- Stop waiting forever on a download, update, or undo started after the background worker had
+  stopped. The app now says the worker stopped.
+
 ## 1.4.7
 
 - Find the data folder the same way in **About** and in the background work. **Open data folder**
