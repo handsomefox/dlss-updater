@@ -2,6 +2,12 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.4.5
+
+- Keep GitHub's error page out of the banner when a catalog refresh or a download fails. During
+  a GitHub outage the banner filled with the page's HTML. It now names only the status, such as
+  "GitHub returned 504 Gateway Timeout".
+
 ## 1.4.4
 
 - Show only the requested release's download progress. While an update ran ahead of a download,
