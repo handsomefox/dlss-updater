@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/dlss-core", "crates/dlss-catalog", "crates/dlss-platform", "crates/dlss-app", "crates/app-update"]
+members = ["crates/dlss-core", "crates/dlss-catalog", "crates/dlss-platform", "crates/dlss-app"]
 resolver = "3"
 
 [workspace.package]
@@ -10,10 +10,10 @@ repository = "https://github.com/handsomefox/dlss-updater"
 description = "A Windows desktop app for safely updating official NVIDIA DLSS and Streamline DLLs"
 
 [workspace.dependencies]
+app-update = { git = "https://github.com/handsomefox/app-update", tag = "v0.1.0", version = "=0.1.0" }
 crossbeam-channel = "=0.5.17"
 eframe = { version = "=0.37.0", default-features = false, features = ["clipboard", "default_fonts", "glow", "links", "persistence", "x11"] }
 egui_extras = "=0.37.0"
-flate2 = { version = "=1.1.10", default-features = false, features = ["zlib-rs"] }
 jiff = "=0.2.38"
 object = { version = "=0.40.0", features = ["pe"] }
 reqwest = { version = "=0.13.5", default-features = false, features = ["blocking", "json", "rustls-no-provider"] }
@@ -21,7 +21,6 @@ rustls = { version = "=0.23.46", default-features = false, features = ["ring", "
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 sha2 = "=0.11.1"
-tar = { version = "=0.4.46", default-features = false }
 tempfile = "=3.27.0"
 thiserror = "=2.0.21"
 tracing = "=0.1.44"
