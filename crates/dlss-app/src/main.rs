@@ -1213,21 +1213,28 @@ impl DlssApp {
                      and verified again after it is written.",
                 );
                 ui.add_space(6.0);
-                ui.hyperlink_to(
-                    widgets::icon_text(icons::ARROW_SQUARE_OUT, "Project page"),
-                    env!("CARGO_PKG_REPOSITORY"),
-                );
-                ui.add_space(6.0);
-                if ui
-                    .button(widgets::icon_text(icons::ARROW_CIRCLE_UP, "App updates…"))
-                    .on_hover_text("Check for a new version and choose how often to check")
-                    .clicked()
-                {
-                    self.open_windows.insert(AppWindow::Update);
-                }
-                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(widgets::icon_text(icons::ARROW_CIRCLE_UP, "App updates…"))
+                        .on_hover_text("Check for a new version and choose how often to check")
+                        .clicked()
+                    {
+                        self.open_windows.insert(AppWindow::Update);
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Inset like the button's label on the left, so both
+                        // texts sit the same distance from the dialog edge.
+                        ui.add_space(ui.spacing().button_padding.x);
+                        ui.hyperlink_to(
+                            widgets::icon_text(icons::ARROW_SQUARE_OUT, "Project page"),
+                            env!("CARGO_PKG_REPOSITORY"),
+                        );
+                    });
+                });
+                ui.add_space(widgets::FRAME_TO_SEPARATOR);
                 ui.separator();
                 widgets::section_title(ui, "Folders", None);
+                ui.add_space(widgets::TITLE_TO_BUTTONS);
                 for (label, hint, directory) in [
                     (
                         "Open log folder",
@@ -1251,10 +1258,13 @@ impl DlssApp {
                         {
                             diagnostics::reveal(&directory);
                         }
-                        ui.weak(hint);
+                        // Wrapped, so a long hint stays inside the dialog
+                        // width instead of widening it past the separators.
+                        ui.add(egui::Label::new(egui::RichText::new(hint).weak()).wrap());
                     });
                 }
-                ui.add_space(10.0);
+                // The folder buttons end the section.
+                ui.add_space(widgets::FRAME_TO_SEPARATOR);
                 ui.separator();
                 ui.weak(
                     "Bundled fonts keep their own licenses: Inter and JetBrains Mono \

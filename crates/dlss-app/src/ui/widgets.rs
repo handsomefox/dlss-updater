@@ -316,6 +316,11 @@ pub(crate) fn table_header_text(title: &str) -> egui::RichText {
 /// clear of a separator; a frame edge does not, and would look crowded.
 pub(crate) const FRAME_TO_SEPARATOR: f32 = 4.0;
 
+/// Extra space between a plain section title and a row of buttons under
+/// it. The title's capitals are centered in its line box, but a button
+/// frame's edge shows where text would not, so the gap would look short.
+pub(crate) const TITLE_TO_BUTTONS: f32 = 2.0;
+
 /// A section title inside a dialog, with an optional action at the right.
 /// Returns true when the action was clicked.
 pub(crate) fn section_title(
