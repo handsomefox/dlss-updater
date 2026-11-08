@@ -583,17 +583,13 @@ fn review_row(ui: &mut egui::Ui, row: &mut ReviewRow) {
         label.append(
             dll_kind_icon(kind),
             0.0,
-            egui::TextFormat {
-                font_id: theme::icon_font(15.0),
-                color: theme::ACCENT,
-                ..Default::default()
-            },
+            widgets::icon_format(widgets::LABEL_ICON_SIZE, theme::ACCENT, widgets::LABEL_SIZE),
         );
         label.append(
             &dlss_core::friendly_dll_label(&row.file_name),
             6.0,
             egui::TextFormat {
-                font_id: egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                font_id: egui::FontId::new(widgets::LABEL_SIZE, egui::FontFamily::Proportional),
                 // An unnamed color falls back to the widget style, which the
                 // checkbox scope darkens for the check mark.
                 color: theme::TEXT,
