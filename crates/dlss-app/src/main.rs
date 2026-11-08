@@ -172,6 +172,22 @@ struct Run {
     current: Option<dlss_core::GameId>,
 }
 
+impl Run {
+    /// `None` when `pending` is empty: a run with no game to wait for would
+    /// never finish, and would keep the app busy for good.
+    fn new(
+        kind: BatchKind,
+        pending: std::collections::HashMap<dlss_core::GameId, Vec<dlss_core::DllInstallationId>>,
+        single_name: Option<String>,
+    ) -> Option<Self> {
+        (!pending.is_empty()).then(|| Self {
+            batch: Batch::new(kind, pending.len(), single_name),
+            pending,
+            current: None,
+        })
+    }
+}
+
 /// What the worker is doing with a game in the current run.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum GameActivity {
@@ -744,26 +760,30 @@ impl DlssApp {
     }
 
     /// Starts a run of updates or undos, one per game in `pending`, so
-    /// progress and the final summary cover the whole run. `games` keeps the
-    /// order the user's games came in.
+    /// progress and the final summary cover the whole run. Returns false,
+    /// and starts nothing, when there are no games; the caller then sends
+    /// the worker nothing.
+    #[must_use]
     fn start_run(
         &mut self,
         kind: BatchKind,
-        games: &[dlss_core::GameId],
         pending: std::collections::HashMap<dlss_core::GameId, Vec<dlss_core::DllInstallationId>>,
-    ) {
-        let single_name = (games.len() == 1).then(|| self.game_name(&games[0]));
+    ) -> bool {
+        let single_name = match pending.keys().collect::<Vec<_>>()[..] {
+            [game] => Some(self.game_name(game)),
+            _ => None,
+        };
+        let Some(run) = Run::new(kind, pending, single_name.clone()) else {
+            return false;
+        };
         let message = match &single_name {
             Some(name) => format!("{} {name}…", kind.verb_ing()),
-            None => format!("{} {} games…", kind.verb_ing(), games.len()),
+            None => format!("{} {} games…", kind.verb_ing(), run.batch.total),
         };
         self.last_change.clear();
-        self.run = Some(Run {
-            batch: Batch::new(kind, games.len(), single_name),
-            pending,
-            current: None,
-        });
+        self.run = Some(run);
         self.notify(ToastKind::Progress, message);
+        true
     }
 
     fn batch_mut(&mut self) -> Option<&mut Batch> {
@@ -814,7 +834,9 @@ impl DlssApp {
             return;
         }
         let pending = games.iter().map(|id| (id.clone(), Vec::new())).collect();
-        self.start_run(BatchKind::Undo, &games, pending);
+        if !self.start_run(BatchKind::Undo, pending) {
+            return;
+        }
         for game_id in games {
             let _ = self.worker.commands.send(Command::UndoLast(game_id));
         }
@@ -1792,6 +1814,15 @@ mod tests {
             inspection_errors: 0,
         };
         assert_eq!(GameRow::from_install(game).dlss_version, Some(newer));
+    }
+
+    #[test]
+    fn a_run_needs_at_least_one_game() {
+        assert!(Run::new(BatchKind::Update, std::collections::HashMap::new(), None).is_none());
+        let pending = [(dlss_core::GameId("game".into()), Vec::new())].into();
+        let run = Run::new(BatchKind::Undo, pending, Some("Game".into())).unwrap();
+        assert_eq!(run.batch.total, 1);
+        assert!(run.current.is_none());
     }
 
     #[test]
