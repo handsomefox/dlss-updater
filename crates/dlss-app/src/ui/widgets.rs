@@ -542,11 +542,49 @@ fn pill_frame(color: egui::Color32) -> egui::Frame {
 }
 
 /// Accent-colored icon next to a heading, for titling view sections.
+///
+/// One label rather than a horizontal row, which is a button tall and would
+/// pad the heading like a title in a button row.
 pub(crate) fn section_heading(ui: &mut egui::Ui, icon: &str, text: &str) {
-    ui.horizontal(|ui| {
-        ui.label(self::icon(icon, 19.0, theme::ACCENT));
-        ui.heading(text);
-    });
+    const SIZE: f32 = 19.0;
+    let mut job = egui::text::LayoutJob::default();
+    job.append(icon, 0.0, icon_format(SIZE, theme::ACCENT, SIZE));
+    job.append(
+        text,
+        ui.spacing().item_spacing.x,
+        egui::TextFormat {
+            font_id: theme::semibold_font(SIZE),
+            color: theme::TEXT,
+            ..Default::default()
+        },
+    );
+    ui.label(job);
+}
+
+/// Texts that read as one line, the gap of two labels in a row apart.
+///
+/// One label rather than a horizontal row of labels, which is a button tall
+/// and would leave more space around the line than around plain text.
+pub(crate) fn text_line(
+    ui: &egui::Ui,
+    parts: impl IntoIterator<Item = egui::RichText>,
+) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    for part in parts {
+        let first = job.sections.len();
+        part.append_to(
+            &mut job,
+            ui.style(),
+            egui::FontSelection::Default,
+            egui::Align::Center,
+        );
+        if first > 0
+            && let Some(section) = job.sections.get_mut(first)
+        {
+            section.leading_space = ui.spacing().item_spacing.x;
+        }
+    }
+    job
 }
 
 /// Full-width tinted banner used for inline warnings and errors.

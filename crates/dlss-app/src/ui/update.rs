@@ -205,12 +205,10 @@ fn available_update(
     ui.add_space(10.0);
     widgets::section_title(ui, "What's new", None);
     for release in update.releases() {
-        ui.horizontal(|ui| {
-            ui.label(semibold(release.version.to_string(), 14.0));
-            if !release.date.is_empty() {
-                ui.label(egui::RichText::new(&release.date).color(theme::TEXT_FAINT));
-            }
-        });
+        let version = semibold(release.version.to_string(), 14.0);
+        let date = (!release.date.is_empty())
+            .then(|| egui::RichText::new(&release.date).color(theme::TEXT_FAINT));
+        ui.label(widgets::text_line(ui, std::iter::once(version).chain(date)));
         release_notes(ui, &release.notes);
         ui.add_space(8.0);
     }

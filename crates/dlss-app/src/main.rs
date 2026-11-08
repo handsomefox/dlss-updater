@@ -952,31 +952,13 @@ impl DlssApp {
                     return;
                 }
                 ui.separator();
-                // One label rather than a horizontal row, which is a button
-                // tall and would leave more air under the separator than over
-                // the next one.
-                let mut now = egui::text::LayoutJob::default();
-                let style = ui.style();
-                egui::RichText::new("Now:")
-                    .color(theme::TEXT_MUTED)
-                    .append_to(
-                        &mut now,
-                        style,
-                        egui::FontSelection::Default,
-                        egui::Align::Center,
-                    );
-                let state = now.sections.len();
-                egui::RichText::new(state_label(&self.tool_state))
-                    .strong()
-                    .append_to(
-                        &mut now,
-                        style,
-                        egui::FontSelection::Default,
-                        egui::Align::Center,
-                    );
-                // The gap two labels in a row would have.
-                now.sections[state].leading_space = ui.spacing().item_spacing.x;
-                ui.label(now);
+                ui.label(widgets::text_line(
+                    ui,
+                    [
+                        egui::RichText::new("Now:").color(theme::TEXT_MUTED),
+                        egui::RichText::new(state_label(&self.tool_state)).strong(),
+                    ],
+                ));
                 ui.separator();
                 widgets::radio_value(ui, &mut self.staged_tool_state, SystemToolState::Off, "Off");
                 widgets::radio_value(
