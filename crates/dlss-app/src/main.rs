@@ -370,6 +370,9 @@ impl DlssApp {
                         self.runtime.worker_connected = false;
                         self.runtime.scanning = false;
                         self.runtime.catalog_loading = false;
+                        self.backups_loading = false;
+                        self.inspecting_release = None;
+                        self.release_progress = None;
                         self.upgrading = None;
                         self.profiles_applying.clear();
                         self.batch = None;
