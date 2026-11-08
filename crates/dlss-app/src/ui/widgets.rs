@@ -311,6 +311,11 @@ pub(crate) fn table_header_text(title: &str) -> egui::RichText {
         .color(theme::TEXT_MUTED)
 }
 
+/// Extra space between a frame, such as a button or a card, and a separator
+/// below it. A text line carries its descent below the letters, so it sits
+/// clear of a separator; a frame edge does not, and would look crowded.
+pub(crate) const FRAME_TO_SEPARATOR: f32 = 4.0;
+
 /// A section title inside a dialog, with an optional action at the right.
 /// Returns true when the action was clicked.
 pub(crate) fn section_title(
