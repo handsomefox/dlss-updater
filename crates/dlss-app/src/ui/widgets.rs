@@ -107,12 +107,14 @@ pub(crate) fn chip_button(icon: &str, label: &str, color: egui::Color32) -> egui
 
 /// A tab label followed by its count in a quieter color, like "Updates 3".
 pub(crate) fn label_with_count(label: &str, count: usize, selected: bool) -> egui::WidgetText {
+    const TAB_LABEL_SIZE: f32 = 13.5;
+    const COUNT_SIZE: f32 = 12.0;
     let mut job = egui::text::LayoutJob::default();
     job.append(
         label,
         0.0,
         egui::TextFormat {
-            font_id: egui::FontId::new(13.5, egui::FontFamily::Proportional),
+            font_id: egui::FontId::new(TAB_LABEL_SIZE, egui::FontFamily::Proportional),
             color: egui::Color32::PLACEHOLDER,
             ..Default::default()
         },
@@ -121,16 +123,32 @@ pub(crate) fn label_with_count(label: &str, count: usize, selected: bool) -> egu
         &count.to_string(),
         6.0,
         egui::TextFormat {
-            font_id: egui::FontId::new(12.0, egui::FontFamily::Proportional),
+            font_id: egui::FontId::new(COUNT_SIZE, egui::FontFamily::Proportional),
             color: if selected {
                 theme::ACCENT
             } else {
                 theme::TEXT_MUTED
             },
+            line_height: Some(baseline_line_height(COUNT_SIZE, TAB_LABEL_SIZE)),
             ..Default::default()
         },
     );
     job.into()
+}
+
+/// The line height that puts smaller Inter text on the baseline of larger
+/// Inter text beside it, so both end on the same pixel row.
+///
+/// egui has no baseline alignment: sections line up at the bottom of their
+/// line boxes, and the smaller text's shorter descent leaves its baseline
+/// lower. A section with an explicit line height is centered in it instead,
+/// so a line height of `ascent(small) + 2 * descent(large) - descent(small)`
+/// lands it exactly on the larger text's baseline. With unrounded metrics
+/// the two baselines differ slightly and can round to different pixel rows.
+fn baseline_line_height(size: f32, beside: f32) -> f32 {
+    let (ascent, descent) = inter_metrics(size);
+    let (_, beside_descent) = inter_metrics(beside);
+    ascent + 2.0 * beside_descent - descent
 }
 
 /// Secondary button for the one recommended action in a row: accent text
@@ -660,6 +678,22 @@ mod tests {
         ctx.run_ui(input, |_| {}).textures_delta.clear();
         let galley = ctx.fonts_mut(|fonts| fonts.layout_job((*job).clone()));
         galley.rows[0].glyphs.clone()
+    }
+
+    #[test]
+    fn tab_counts_sit_on_the_label_baseline() {
+        for scale in SCALES {
+            for (label, count) in [("Updates", 3), ("With DLLs", 12)] {
+                let glyphs = glyphs(label_with_count(label, count, false), scale);
+                let (first, last) = (&glyphs[0], &glyphs[glyphs.len() - 1]);
+                assert!(
+                    (first.pos.y - last.pos.y).abs() < 1e-4,
+                    "{label} {count} at {scale}x: label baseline {}, count baseline {}",
+                    first.pos.y,
+                    last.pos.y
+                );
+            }
+        }
     }
 
     #[test]
