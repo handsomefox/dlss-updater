@@ -117,12 +117,12 @@ struct DlssApp {
     catalog_error: Option<String>,
     releases: Vec<dlss_core::CachedRelease>,
     release_errors: std::collections::HashMap<dlss_core::ReleaseId, String>,
-    release_progress: Option<(dlss_core::ReleaseId, u64, Option<u64>)>,
+    /// The release download the user asked for, while it runs.
+    release_download: Option<ReleaseDownload>,
     imports: Vec<dlss_core::ImportedDllRecord>,
     backups: Vec<dlss_core::BackupRecord>,
     backup_warning: Option<String>,
     backups_loading: bool,
-    inspecting_release: Option<dlss_core::ReleaseId>,
     /// The game the worker is changing right now.
     upgrading: Option<dlss_core::GameId>,
     toast: Option<Toast>,
@@ -163,6 +163,13 @@ enum AppWindow {
 enum View {
     Library,
     Game(dlss_core::GameId),
+}
+
+/// A release download the user started. Progress belongs to this release
+/// only, and stays `None` until the worker reports the first step.
+struct ReleaseDownload {
+    id: dlss_core::ReleaseId,
+    progress: Option<(u64, Option<u64>)>,
 }
 
 struct RuntimeStatus {
@@ -333,12 +340,11 @@ impl DlssApp {
             catalog_error: None,
             releases: Vec::new(),
             release_errors: std::collections::HashMap::new(),
-            release_progress: None,
+            release_download: None,
             imports: Vec::new(),
             backups: Vec::new(),
             backup_warning: None,
             backups_loading: true,
-            inspecting_release: None,
             upgrading: None,
             toast: None,
             batch: None,
@@ -371,8 +377,7 @@ impl DlssApp {
                         self.runtime.scanning = false;
                         self.runtime.catalog_loading = false;
                         self.backups_loading = false;
-                        self.inspecting_release = None;
-                        self.release_progress = None;
+                        self.release_download = None;
                         self.upgrading = None;
                         self.profiles_applying.clear();
                         self.batch = None;
@@ -511,8 +516,7 @@ impl DlssApp {
         &mut self,
         result: Result<dlss_core::CachedRelease, worker::WorkerError>,
     ) {
-        let requested_id = self.inspecting_release.take();
-        self.release_progress = None;
+        let requested_id = self.release_download.take().map(|download| download.id);
         match result {
             Ok(release) => {
                 self.release_errors.remove(&release.metadata.id);
@@ -617,8 +621,10 @@ impl DlssApp {
         }
         // An update can validate other releases while this one waits its
         // turn; only the requested download's own progress is shown.
-        if self.inspecting_release.as_ref() == Some(id) {
-            self.release_progress = Some((id.clone(), received, total));
+        if let Some(download) = &mut self.release_download
+            && &download.id == id
+        {
+            download.progress = Some((received, total));
         }
         self.notify(ToastKind::Progress, progress_label(state, received, total));
     }
@@ -777,6 +783,15 @@ impl DlssApp {
             self.profiles_applying.insert(game_id.clone(), Vec::new());
             let _ = self.worker.commands.send(Command::UndoLast(game_id));
         }
+    }
+
+    /// Downloads and validates an official release in the worker.
+    pub(crate) fn start_release_download(&mut self, id: dlss_core::ReleaseId) {
+        self.release_download = Some(ReleaseDownload {
+            id: id.clone(),
+            progress: None,
+        });
+        let _ = self.worker.commands.send(Command::InspectRelease(id));
     }
 
     fn game_name(&self, game_id: &dlss_core::GameId) -> String {

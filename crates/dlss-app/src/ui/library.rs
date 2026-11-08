@@ -6,7 +6,9 @@ use super::theme::{self, icons};
 use super::toast::plural;
 use super::widgets::{self, TriState};
 use crate::ui::review::ReviewIntent;
-use crate::{Command, DlssApp, GameFilter, GameRow, GameSort, SortKey, StoreFilter, View};
+use crate::{
+    Command, DlssApp, GameFilter, GameRow, GameSort, ReleaseDownload, SortKey, StoreFilter, View,
+};
 use eframe::egui;
 
 const ROW_HEIGHT: f32 = 40.0;
@@ -106,7 +108,7 @@ impl DlssApp {
                 ui.with_layout(
                     egui::Layout::right_to_left(egui::Align::Center),
                     |ui| match &latest {
-                        _ if self.inspecting_release.is_some() => {
+                        _ if self.release_download.is_some() => {
                             let (state, received, total) = self.release_progress_now();
                             ui.scope(|ui| {
                                 ui.set_max_width(280.0);
@@ -167,9 +169,7 @@ impl DlssApp {
         });
         ui.add_space(10.0);
         if let Some(id) = download {
-            self.inspecting_release = Some(id.clone());
-            self.release_progress = None;
-            let _ = self.worker.commands.send(Command::InspectRelease(id));
+            self.start_release_download(id);
         }
         if open_sources {
             self.open_windows.insert(crate::AppWindow::Releases);
@@ -182,7 +182,11 @@ impl DlssApp {
     /// The state, bytes received, and total size of the release download in
     /// progress, for a progress bar.
     pub(crate) fn release_progress_now(&self) -> (dlss_core::ReleaseState, u64, Option<u64>) {
-        let Some((id, received, total)) = &self.release_progress else {
+        let Some(ReleaseDownload {
+            id,
+            progress: Some((received, total)),
+        }) = &self.release_download
+        else {
             return (dlss_core::ReleaseState::Downloading, 0, None);
         };
         let state = self

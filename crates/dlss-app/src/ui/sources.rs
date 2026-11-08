@@ -59,11 +59,7 @@ impl DlssApp {
             let _ = self.worker.commands.send(Command::ImportDll(path));
         }
         match action {
-            Some(ReleaseAction::Download(id)) => {
-                self.inspecting_release = Some(id.clone());
-                self.release_progress = None;
-                let _ = self.worker.commands.send(Command::InspectRelease(id));
-            }
+            Some(ReleaseAction::Download(id)) => self.start_release_download(id),
             Some(ReleaseAction::Remove(id)) => {
                 let _ = self.worker.commands.send(Command::RemoveRelease(id));
             }
@@ -120,7 +116,7 @@ impl DlssApp {
         if self.releases.is_empty() {
             return refresh;
         }
-        let busy = self.inspecting_release.is_some();
+        let busy = self.release_download.is_some();
         widgets::card(ui, |ui| {
             for (position, release) in self.releases.iter().enumerate() {
                 if position > 0 {
@@ -128,12 +124,10 @@ impl DlssApp {
                 }
                 let id = &release.metadata.id;
                 let progress = self
-                    .release_progress
+                    .release_download
                     .as_ref()
-                    .filter(|(progress_id, _, _)| {
-                        progress_id == id && self.inspecting_release.as_ref() == Some(id)
-                    })
-                    .map(|(_, received, total)| (*received, *total));
+                    .filter(|download| &download.id == id)
+                    .and_then(|download| download.progress);
                 let latest = self.catalog_release.as_ref() == Some(&release.metadata.tag);
                 let row = ReleaseRow {
                     release,

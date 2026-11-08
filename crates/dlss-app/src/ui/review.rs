@@ -217,7 +217,7 @@ impl DlssApp {
                     self.release_errors.contains_key(&release.metadata.id),
                 )
             }),
-            downloading: self.inspecting_release.is_some(),
+            downloading: self.release_download.is_some(),
             busy: self.busy(),
         };
         // The body decides how many rows are checked and the pinned footer
@@ -258,9 +258,7 @@ impl DlssApp {
         }
         if download && let Some(release) = self.latest_release_meta() {
             let id = release.metadata.id.clone();
-            self.inspecting_release = Some(id.clone());
-            self.release_progress = None;
-            let _ = self.worker.commands.send(Command::InspectRelease(id));
+            self.start_release_download(id);
         }
         if apply {
             self.apply_review(&review);
@@ -296,7 +294,7 @@ impl DlssApp {
         if let Some(error) = self.release_errors.get(&release.metadata.id) {
             widgets::banner(ui, theme::DANGER, icons::WARNING_CIRCLE, error, false);
         }
-        if self.inspecting_release.is_some() {
+        if self.release_download.is_some() {
             let (state, received, total) = self.release_progress_now();
             ui.horizontal(|ui| widgets::download_progress(ui, state, received, total));
         }
