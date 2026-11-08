@@ -1073,7 +1073,6 @@ impl DlssApp {
                         ui.weak("Scanning…");
                     });
                 }
-                ui.add_space(10.0);
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.strong("Your folders");
