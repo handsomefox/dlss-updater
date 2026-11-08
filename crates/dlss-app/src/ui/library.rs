@@ -676,12 +676,13 @@ fn status_cell(
             false
         }
         RowStatus::OptionalUpdates => {
-            widgets::status_text(ui, icons::CHECK, "DLSS up to date", theme::SUCCESS);
-            ui.label(
-                egui::RichText::new(format!("+{}", game.upgrades))
-                    .color(theme::TEXT_MUTED)
-                    .size(12.0),
-            )
+            ui.label(widgets::status_with_count(
+                icons::CHECK,
+                "DLSS up to date",
+                theme::SUCCESS,
+                &format!("+{}", game.upgrades),
+                ui.spacing().item_spacing.x,
+            ))
             .on_hover_text(format!(
                 "{} for Streamline or Reflex. These are optional; open the game to review them.",
                 plural(game.upgrades, "update")

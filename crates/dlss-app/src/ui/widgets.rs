@@ -15,8 +15,11 @@ pub(crate) fn icon_text(icon: &str, label: &str) -> egui::WidgetText {
 }
 
 fn colored_icon_text(icon: &str, label: &str, color: Option<egui::Color32>) -> egui::WidgetText {
+    icon_label_job(icon, label, color.unwrap_or(egui::Color32::PLACEHOLDER)).into()
+}
+
+fn icon_label_job(icon: &str, label: &str, color: egui::Color32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::default();
-    let color = color.unwrap_or(egui::Color32::PLACEHOLDER);
     job.append(icon, 0.0, icon_format(LABEL_ICON_SIZE, color, LABEL_SIZE));
     if !label.is_empty() {
         job.append(
@@ -29,7 +32,7 @@ fn colored_icon_text(icon: &str, label: &str, color: Option<egui::Color32>) -> e
             },
         );
     }
-    job.into()
+    job
 }
 
 /// The icon section of an icon-and-label line, beside Inter text of size
@@ -105,10 +108,12 @@ pub(crate) fn chip_button(icon: &str, label: &str, color: egui::Color32) -> egui
         .min_size(egui::vec2(0.0, 24.0))
 }
 
+/// Size of a count beside a label, as in a tab or a status.
+const COUNT_SIZE: f32 = 12.0;
+
 /// A tab label followed by its count in a quieter color, like "Updates 3".
 pub(crate) fn label_with_count(label: &str, count: usize, selected: bool) -> egui::WidgetText {
     const TAB_LABEL_SIZE: f32 = 13.5;
-    const COUNT_SIZE: f32 = 12.0;
     let mut job = egui::text::LayoutJob::default();
     job.append(
         label,
@@ -282,6 +287,30 @@ pub(crate) fn status_text(
     color: egui::Color32,
 ) -> egui::Response {
     ui.label(colored_icon_text(icon, label, Some(color)))
+}
+
+/// [`status_text`] followed by a count in smaller, muted text, like
+/// "DLSS up to date +2". One label, so the count sits on the label's
+/// baseline; as a separate label egui would center it a pixel high.
+pub(crate) fn status_with_count(
+    icon: &str,
+    label: &str,
+    color: egui::Color32,
+    count: &str,
+    gap: f32,
+) -> egui::WidgetText {
+    let mut job = icon_label_job(icon, label, color);
+    job.append(
+        count,
+        gap,
+        egui::TextFormat {
+            font_id: egui::FontId::new(COUNT_SIZE, egui::FontFamily::Proportional),
+            color: theme::TEXT_MUTED,
+            line_height: Some(baseline_line_height(COUNT_SIZE, LABEL_SIZE)),
+            ..Default::default()
+        },
+    );
+    job.into()
 }
 
 /// Paints the band behind a table header cell: the panel color with a rule
@@ -735,6 +764,16 @@ mod tests {
                     last.pos.y
                 );
             }
+            let status = status_with_count(icons::CHECK, "Up to date", theme::SUCCESS, "+2", 8.0);
+            let glyphs = glyphs(status, scale);
+            // The first glyph is the icon.
+            let (first, last) = (&glyphs[1], &glyphs[glyphs.len() - 1]);
+            assert!(
+                (first.pos.y - last.pos.y).abs() < 1e-4,
+                "status at {scale}x: label baseline {}, count baseline {}",
+                first.pos.y,
+                last.pos.y
+            );
         }
     }
 
