@@ -41,15 +41,8 @@ use windows::{
             MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, VS_FIXEDFILEINFO,
             VerQueryValueW,
         },
-        System::{
-            Com::CoTaskMemFree,
-            Threading::{INFINITE, WaitForSingleObject},
-        },
-        UI::Shell::{
-            FOLDERID_LocalAppData, FOLDERID_ProgramData, KNOWN_FOLDER_FLAG,
-            SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, SHGetKnownFolderPath, ShellExecuteExW,
-            ShellExecuteW,
-        },
+        System::Threading::{INFINITE, WaitForSingleObject},
+        UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
         UI::WindowsAndMessaging::SW_SHOWNORMAL,
     },
     core::{HRESULT, PCWSTR},
@@ -101,50 +94,6 @@ fn shell_execute_error(error: &windows::core::Error) -> CoreError {
     } else {
         windows_error(error)
     }
-}
-
-/// Values at or below this mean `ShellExecuteW` failed. Above it, the return
-/// value is a legacy instance handle.
-const SHELL_EXECUTE_MIN_SUCCESS: usize = 32;
-
-/// Opens a folder in Explorer.
-///
-/// Spawning `explorer.exe` as a child process is unreliable: Explorer hands the
-/// path to the running shell and exits, and the launch itself can fail before
-/// any window appears. `ShellExecuteW` is the documented way to ask the shell
-/// to open a path, and it starts no process of ours.
-///
-/// # Errors
-/// Returns an error when the path cannot be passed to the shell, or when the
-/// shell refuses to open it.
-pub fn open_folder(directory: &Path) -> Result<(), CoreError> {
-    let path = wide(directory);
-    // `wide` appends the terminator, so a NUL anywhere earlier came from the
-    // path itself and would truncate the argument.
-    if path[..path.len() - 1].contains(&0) {
-        return Err(CoreError::Validation("folder path contains NUL".into()));
-    }
-    // SAFETY: `path` is NUL-terminated and outlives this synchronous call, the
-    // verb is a static wide literal, and every remaining argument is the
-    // documented null. egui runs this on the window thread, where winit has
-    // already initialized COM for the shell extensions Explorer loads.
-    let instance = unsafe {
-        ShellExecuteW(
-            None,
-            windows::core::w!("open"),
-            PCWSTR(path.as_ptr()),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
-    };
-    if instance.0.addr() <= SHELL_EXECUTE_MIN_SUCCESS {
-        return Err(CoreError::Validation(format!(
-            "the shell refused to open the folder (code {})",
-            instance.0.addr()
-        )));
-    }
-    Ok(())
 }
 
 pub struct WindowsDllInspector;
@@ -690,30 +639,13 @@ pub struct WindowsKnownDirectories;
 
 impl KnownDirectories for WindowsKnownDirectories {
     fn local_app_data(&self) -> Result<PathBuf, CoreError> {
-        known_folder(&FOLDERID_LocalAppData)
+        app_folders::local_app_data()
+            .ok_or_else(|| CoreError::Validation("cannot find the local app data folder".into()))
     }
 
     fn program_data(&self) -> Result<PathBuf, CoreError> {
-        known_folder(&FOLDERID_ProgramData)
-    }
-}
-
-#[expect(
-    clippy::multiple_unsafe_ops_per_block,
-    reason = "the COM allocation must remain live through conversion and then be freed once"
-)]
-fn known_folder(id: &windows::core::GUID) -> Result<PathBuf, CoreError> {
-    // SAFETY: the returned COM allocation is converted before being freed once.
-    unsafe {
-        let value = SHGetKnownFolderPath(id, KNOWN_FOLDER_FLAG::default(), None)
-            .map_err(|error| windows_error(&error))?;
-        let path = PathBuf::from(
-            value
-                .to_string()
-                .map_err(|error| CoreError::Validation(error.to_string()))?,
-        );
-        CoTaskMemFree(Some(value.as_ptr().cast()));
-        Ok(path)
+        app_folders::program_data()
+            .ok_or_else(|| CoreError::Validation("cannot find the ProgramData folder".into()))
     }
 }
 
@@ -1009,7 +941,7 @@ pub fn run_elevated_helper(
 ) -> Result<(), CoreError> {
     tracing::info!(plan = %plan_path.display(), "elevated helper started");
     let local = WindowsKnownDirectories.local_app_data()?;
-    let base = local.join("DLSS Updater");
+    let base = local.join(crate::DATA_FOLDER);
     let plan_directory = base.join("helper-plans");
     let result_directory = base.join("helper-results");
     fs::create_dir_all(&plan_directory)?;

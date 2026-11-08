@@ -54,6 +54,7 @@ fn main() -> eframe::Result {
 
 /// Where this app's releases are published.
 const APP_INFO: app_update::AppInfo = app_update::AppInfo {
+    name: "DLSS Updater",
     owner: "handsomefox",
     repo: "dlss-updater",
     bin: "dlss-updater",
@@ -1209,7 +1210,7 @@ impl DlssApp {
                         // The label promises a check, so start one as the
                         // dialog opens. The updater leaves a running check
                         // or download alone.
-                        actions.push(Action::CheckAppUpdate);
+                        actions.push(Action::AppUpdate(app_update_ui::Action::CheckNow));
                         actions.push(Action::OpenWindow(AppWindow::Update));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1235,7 +1236,7 @@ impl DlssApp {
                     (
                         "Open data folder",
                         "Backups, the validated release cache, and imported DLLs",
-                        diagnostics::data_directory(),
+                        dlss_platform::data_directory(),
                     ),
                 ] {
                     let Some(directory) = directory else {

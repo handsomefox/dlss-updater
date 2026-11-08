@@ -336,7 +336,7 @@ fn remove_release_command(id: ReleaseId, events: &EventSink, state: &mut WorkerS
 fn data_root() -> WorkerResult<PathBuf> {
     Ok(dlss_platform::windows::WindowsKnownDirectories
         .local_app_data()?
-        .join("DLSS Updater"))
+        .join(dlss_platform::DATA_FOLDER))
 }
 
 /// Where a release's downloaded archive and its extracted, validated DLLs

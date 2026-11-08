@@ -1,24 +1,100 @@
 //! Updates to DLSS Updater itself: the toolbar chip that points out a new
-//! version, and the dialog with its release notes, the install, and how often
-//! to check.
+//! version, and the dialog around the shared update content from
+//! `app_update_ui`, drawn in this app's theme.
 
 use super::theme::{self, icons};
 use super::widgets;
-use crate::{APP_INFO, Action, AppWindow, DlssApp};
-use app_update::{CheckPeriod, NoteBlock, Settings, Updater};
-use eframe::egui;
+use crate::{Action, AppWindow, DlssApp};
+use app_update_ui::Icon;
+use eframe::egui::{self, Color32, RichText, Ui, Visuals, WidgetText};
+
+/// The app's theme, as the shared update dialog asks for it.
+struct Look;
+
+impl app_update_ui::Look for Look {
+    fn muted(&self, _visuals: &Visuals) -> Color32 {
+        theme::TEXT_MUTED
+    }
+
+    fn success(&self, _visuals: &Visuals) -> Color32 {
+        theme::ACCENT
+    }
+
+    fn warning(&self, _visuals: &Visuals) -> Color32 {
+        theme::WARNING
+    }
+
+    fn space_xs(&self) -> f32 {
+        6.0
+    }
+
+    fn space_md(&self) -> f32 {
+        10.0
+    }
+
+    fn heading(&self, text: RichText) -> RichText {
+        text.font(theme::semibold_font(16.0))
+    }
+
+    fn section(&self, text: RichText) -> RichText {
+        text.font(theme::semibold_font(15.5))
+    }
+
+    fn bold(&self, text: RichText) -> RichText {
+        text.font(theme::semibold_font(14.0))
+    }
+
+    fn fine_print(&self, text: RichText) -> RichText {
+        text.color(theme::TEXT_FAINT)
+    }
+
+    fn glyph(&self, icon: Icon) -> Option<&'static str> {
+        match icon {
+            Icon::CheckNow | Icon::Restart => Some(icons::ARROW_CLOCKWISE),
+            Icon::Download => Some(icons::DOWNLOAD_SIMPLE),
+            Icon::Success => Some(icons::CHECK_CIRCLE),
+            Icon::Warning => Some(icons::WARNING),
+            Icon::Link => Some(icons::ARROW_SQUARE_OUT),
+            Icon::Skip | Icon::Later => None,
+        }
+    }
+
+    fn icon_text(&self, icon: Icon, text: &str, color: Option<Color32>) -> WidgetText {
+        match (self.glyph(icon), color) {
+            (Some(glyph), Some(color)) => {
+                widgets::colored_icon_label(glyph, text, color, widgets::LABEL_SIZE)
+            }
+            (Some(glyph), None) => widgets::icon_text(glyph, text),
+            (None, Some(color)) => RichText::new(text).color(color).into(),
+            (None, None) => text.into(),
+        }
+    }
+
+    fn primary_button(&self, icon: Icon, text: &str) -> egui::Button<'static> {
+        self.glyph(icon).map_or_else(
+            || widgets::primary_button(text),
+            |glyph| widgets::primary_icon_button(glyph, text),
+        )
+    }
+
+    fn show_error(&self, ui: &mut Ui, message: &str) {
+        widgets::banner(ui, theme::WARNING, icons::WARNING, message, false);
+        ui.add_space(widgets::FRAME_TO_SEPARATOR);
+    }
+
+    /// The modal already scrolls its whole body.
+    fn notes_height(&self, _ui: &Ui) -> Option<f32> {
+        None
+    }
+}
 
 impl DlssApp {
     /// A chip beside the window buttons while a new version is out, the way
     /// the Streamline chip points out a new NVIDIA release.
-    pub(crate) fn app_update_chip(&mut self, ui: &mut egui::Ui) {
-        let Some(release) = self.updater.notification(&self.persisted.app_updates) else {
+    pub(crate) fn app_update_chip(&mut self, ui: &mut Ui) {
+        let Some(text) = app_update_ui::chip_text(&self.updater, &self.persisted.app_updates)
+        else {
             return;
-        };
-        let text = if self.updater.staged().is_some() {
-            format!("Restart for {}", release.version)
-        } else {
-            format!("Update {} available", release.version)
         };
         if ui
             .add(widgets::chip_button(
@@ -26,7 +102,7 @@ impl DlssApp {
                 &text,
                 theme::ACCENT,
             ))
-            .on_hover_text("A new version of DLSS Updater is out. Click to see what changed.")
+            .on_hover_text(app_update_ui::chip_hover_text(&self.updater))
             .clicked()
         {
             self.open_windows.insert(AppWindow::Update);
@@ -35,268 +111,29 @@ impl DlssApp {
 
     pub(crate) fn update_window(&mut self, ctx: &egui::Context) {
         let mut open = true;
-        let mut period = self.persisted.app_updates.period;
-        let mut actions = Vec::new();
+        let mut chosen = None;
         let mut action = None;
-        let busy = self.busy();
+        let busy = self
+            .busy()
+            .then_some("Wait for the DLL changes in progress to finish");
         let updater = &self.updater;
-        let settings = &self.persisted.app_updates;
+        let settings = &mut self.persisted.app_updates;
         widgets::modal_with_actions(
             ctx,
-            widgets::dialog("app-update", icons::ARROW_CIRCLE_UP, "App updates", 560.0),
+            widgets::dialog(
+                "app-update",
+                icons::ARROW_CIRCLE_UP,
+                app_update_ui::TITLE,
+                560.0,
+            ),
             &mut open,
-            |ui| update_body(ui, updater, settings, &mut period, &mut actions),
-            |ui| action = update_actions(ui, updater, busy),
+            |ui| chosen = app_update_ui::body(ui, &Look, updater, settings),
+            |ui| action = app_update_ui::actions(ui, &Look, updater, busy),
         );
-        self.persisted.app_updates.period = period;
-        actions.extend(action);
         // Before the actions, because Skip and Not now close the dialog.
         self.set_window_open(AppWindow::Update, open);
-        self.apply_all(ctx, actions);
-    }
-}
-
-fn semibold(text: impl Into<String>, size: f32) -> egui::RichText {
-    egui::RichText::new(text).font(theme::semibold_font(size))
-}
-
-/// Space between the status band and the separator below it. A one-line
-/// status gets the same space above, to sit centered between separators.
-const STATUS_GAP: f32 = 6.0;
-
-/// Where the app stands when there is no update to offer.
-fn status_line(ui: &mut egui::Ui, updater: &Updater, current: &str) {
-    if updater.is_checking() {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.label("Checking GitHub for a new version…");
-        });
-    } else if updater.is_up_to_date() {
-        ui.label(widgets::colored_icon_label(
-            icons::CHECK_CIRCLE,
-            &format!("Version {current} is the latest version."),
-            theme::ACCENT,
-            14.0,
-        ));
-    } else {
-        ui.label(
-            egui::RichText::new(format!("You have version {current}.")).color(theme::TEXT_MUTED),
-        );
-    }
-}
-
-fn update_body(
-    ui: &mut egui::Ui,
-    updater: &Updater,
-    settings: &Settings,
-    period: &mut CheckPeriod,
-    actions: &mut Vec<Action>,
-) {
-    let current = updater.current().map_or_else(
-        || APP_INFO.version.to_owned(),
-        |version| version.to_string(),
-    );
-    if let Some(update) = updater.update() {
-        available_update(ui, updater, settings, update, &current);
-    } else {
-        // A one-line status gets the air it has below, above it too, so it
-        // sits in the middle of the band between the two separators.
-        ui.add_space(STATUS_GAP);
-        status_line(ui, updater, &current);
-    }
-    if let Some(error) = updater.error() {
-        ui.add_space(8.0);
-        widgets::banner(ui, theme::WARNING, icons::WARNING, error, false);
-        ui.add_space(widgets::FRAME_TO_SEPARATOR);
-    }
-
-    ui.add_space(STATUS_GAP);
-    ui.separator();
-    widgets::section_title(ui, "Checking", None);
-    ui.add_space(widgets::TITLE_TO_BUTTONS);
-    ui.horizontal(|ui| {
-        ui.label("Check for new versions");
-        egui::ComboBox::from_id_salt("app-update-period")
-            .selected_text(period.label())
-            .show_ui(ui, |ui| {
-                for option in CheckPeriod::ALL {
-                    ui.selectable_value(period, option, option.label());
-                }
-            });
-        if ui
-            .add_enabled(
-                !updater.is_busy(),
-                egui::Button::new(widgets::icon_text(icons::ARROW_CLOCKWISE, "Check now")),
-            )
-            .clicked()
-        {
-            actions.push(Action::CheckAppUpdate);
-        }
-    });
-    let last = settings.last_check.map_or_else(
-        || "Never checked".to_owned(),
-        |then| {
-            format!(
-                "Last checked {}",
-                app_update::describe_age(then, app_update::now())
-            )
-        },
-    );
-    ui.label(
-        egui::RichText::new(format!(
-            "{last}. A check asks GitHub for this app's releases and sends nothing else."
-        ))
-        .color(theme::TEXT_FAINT),
-    );
-}
-
-/// The newest version, where the install stands, and the notes of every
-/// release since the running one.
-fn available_update(
-    ui: &mut egui::Ui,
-    updater: &Updater,
-    settings: &Settings,
-    update: &app_update::Update,
-    current: &str,
-) {
-    let latest = update.latest();
-    ui.label(semibold(
-        format!("Version {} is available", latest.version),
-        16.0,
-    ));
-    let released = if latest.date.is_empty() {
-        String::new()
-    } else {
-        format!(" It was released on {}.", latest.date)
-    };
-    ui.label(
-        egui::RichText::new(format!("You have version {current}.{released}"))
-            .color(theme::TEXT_MUTED),
-    );
-    if updater.staged() == Some(latest.version) {
-        ui.add_space(6.0);
-        ui.label(widgets::colored_icon_label(
-            icons::CHECK_CIRCLE,
-            "Downloaded and verified. Restart DLSS Updater to finish.",
-            theme::ACCENT,
-            13.0,
-        ));
-    } else if settings.skipped.as_deref() == Some(latest.version.to_string().as_str()) {
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new("You skipped this version, so the toolbar does not point it out.")
-                .color(theme::TEXT_MUTED),
-        );
-    }
-    if !updater.can_install() {
-        ui.add_space(6.0);
-        ui.label(
-            egui::RichText::new(
-                "This release has no build that DLSS Updater can install by itself. \
-                 Download it from the release page instead.",
-            )
-            .color(theme::TEXT_MUTED),
-        );
-        ui.hyperlink_to(
-            widgets::icon_text(icons::ARROW_SQUARE_OUT, "Release page"),
-            &latest.page_url,
-        );
-    }
-    ui.add_space(10.0);
-    widgets::section_title(ui, "What's new", None);
-    for release in update.releases() {
-        let version = semibold(release.version.to_string(), 14.0);
-        let date = (!release.date.is_empty())
-            .then(|| egui::RichText::new(&release.date).color(theme::TEXT_FAINT));
-        ui.label(widgets::text_line(ui, std::iter::once(version).chain(date)));
-        release_notes(ui, &release.notes);
-        ui.add_space(8.0);
-    }
-    ui.hyperlink_to(
-        widgets::icon_text(icons::ARROW_SQUARE_OUT, "All releases"),
-        APP_INFO.releases_page(),
-    );
-}
-
-fn release_notes(ui: &mut egui::Ui, markdown: &str) {
-    let blocks = app_update::parse_notes(markdown);
-    if blocks.is_empty() {
-        ui.label(egui::RichText::new("No notes for this release.").color(theme::TEXT_MUTED));
-    }
-    for block in blocks {
-        match block {
-            NoteBlock::Heading(text) => {
-                ui.label(semibold(text, 13.5));
-            }
-            NoteBlock::Bullet(text) => {
-                ui.horizontal_top(|ui| {
-                    ui.label(egui::RichText::new("•").color(theme::TEXT_MUTED));
-                    ui.add(egui::Label::new(text).wrap());
-                });
-            }
-            NoteBlock::Paragraph(text) => {
-                ui.add(egui::Label::new(text).wrap());
-            }
+        if let Some(action) = action.or(chosen) {
+            self.apply_all(ctx, vec![Action::AppUpdate(action)]);
         }
     }
-}
-
-fn update_actions(ui: &mut egui::Ui, updater: &Updater, busy: bool) -> Option<Action> {
-    let update = updater.update()?;
-    ui.add_space(8.0);
-    if let Some((received, total)) = updater.progress() {
-        let percent = total
-            .filter(|total| *total > 0)
-            .map_or(0, |total| received.saturating_mul(100) / total)
-            .min(100);
-        let fraction = f32::from(u8::try_from(percent).unwrap_or(100)) / 100.0;
-        ui.add(egui::ProgressBar::new(fraction).text(format!(
-            "Downloading {}… {percent}%",
-            update.latest().version
-        )));
-        return None;
-    }
-    widgets::button_row(ui, |ui| {
-        let mut action = None;
-        if updater.staged().is_some() {
-            if ui
-                .add_enabled(
-                    !busy,
-                    widgets::primary_icon_button(icons::ARROW_CLOCKWISE, "Restart to update"),
-                )
-                .on_hover_text("Close DLSS Updater and open the new version")
-                .on_disabled_hover_text("Wait for the DLL changes in progress to finish")
-                .clicked()
-            {
-                action = Some(Action::RestartForAppUpdate);
-            }
-        } else if updater.can_install()
-            && ui
-                .add_enabled(
-                    !updater.is_busy(),
-                    widgets::primary_icon_button(icons::DOWNLOAD_SIMPLE, "Download update"),
-                )
-                .on_hover_text(
-                    "Download the new version and check it against its published SHA-256",
-                )
-                .clicked()
-        {
-            action = Some(Action::DownloadAppUpdate);
-        }
-        if ui
-            .button("Skip this version")
-            .on_hover_text("Stop pointing out this version. A newer one shows up again.")
-            .clicked()
-        {
-            action = Some(Action::SkipAppUpdate);
-        }
-        if ui
-            .button("Not now")
-            .on_hover_text("Hide the reminder until DLSS Updater starts again")
-            .clicked()
-        {
-            action = Some(Action::DismissAppUpdate);
-        }
-        action
-    })
 }

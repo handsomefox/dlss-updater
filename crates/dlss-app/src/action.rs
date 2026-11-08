@@ -43,13 +43,8 @@ pub(crate) enum Action {
     },
     DismissToast,
     UndoLastChange,
-    CheckAppUpdate,
-    DownloadAppUpdate,
-    /// Installs the downloaded update and closes the window, so the new
-    /// version starts.
-    RestartForAppUpdate,
-    SkipAppUpdate,
-    DismissAppUpdate,
+    /// A choice in the app updates dialog, or the About window's check.
+    AppUpdate(app_update_ui::Action),
 }
 
 impl DlssApp {
@@ -116,20 +111,15 @@ impl DlssApp {
             Action::ChangeIndicator { restore } => self.change_indicator(restore),
             Action::DismissToast => self.toast = None,
             Action::UndoLastChange => self.undo_last_change(),
-            Action::CheckAppUpdate => self.updater.check_now(),
-            Action::DownloadAppUpdate => self.updater.download(),
-            Action::RestartForAppUpdate => {
-                if self.updater.install_and_restart().is_ok() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            Action::AppUpdate(action) => {
+                if app_update_ui::apply(
+                    action,
+                    ctx,
+                    &mut self.updater,
+                    &mut self.persisted.app_updates,
+                ) {
+                    self.open_windows.remove(&AppWindow::Update);
                 }
-            }
-            Action::SkipAppUpdate => {
-                self.updater.skip(&mut self.persisted.app_updates);
-                self.open_windows.remove(&AppWindow::Update);
-            }
-            Action::DismissAppUpdate => {
-                self.updater.dismiss();
-                self.open_windows.remove(&AppWindow::Update);
             }
         }
     }

@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+app-folders.workspace = true
 dlss-core = { version = "=1.4.6", path = "../dlss-core" }
 object.workspace = true
 serde.workspace = true
