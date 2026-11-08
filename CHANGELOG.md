@@ -2,6 +2,17 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.4.4
+
+- Show only the requested release's download progress. While an update ran ahead of a download,
+  the setup card and **Review DLSS updates** showed the progress of other releases.
+- Clear the spinners and enable the buttons again when the background worker stops unexpectedly.
+- Leave a Streamline release out of **DLL sources** when GitHub reports a checksum for it that the
+  app cannot read. Such a release could stop the background worker.
+- Stop leaving a copy of the DLL in the app's data folder when an import fails.
+- Refuse an app update whose checksum on GitHub cannot be read, instead of skipping that check.
+- Retry putting the current version back when installing an app update fails.
+
 ## 1.4.3
 
 - Fix the DLL names in **Review DLSS updates**, which turned almost black on ticked rows in 1.4.1
