@@ -259,9 +259,23 @@ fn dispatch(command: Command, events: &EventSink, state: &mut WorkerState) -> bo
     true
 }
 
+/// Reports a release's download and validation steps to the UI.
+fn release_progress(
+    events: &EventSink,
+    id: ReleaseId,
+) -> impl FnMut(dlss_core::ReleaseState, u64, Option<u64>) {
+    let events = events.clone();
+    move |state, received, total| {
+        events.send(Event::ReleaseProgress {
+            id: id.clone(),
+            state,
+            received,
+            total,
+        });
+    }
+}
+
 fn inspect_release_command(id: ReleaseId, events: &EventSink, state: &mut WorkerState) {
-    let progress_events = events.clone();
-    let progress_id = id.clone();
     let asset = state
         .assets
         .iter()
@@ -276,14 +290,7 @@ fn inspect_release_command(id: ReleaseId, events: &EventSink, state: &mut Worker
             &asset,
             state,
             Revalidate::Always,
-            |release_state, received, total| {
-                progress_events.send(Event::ReleaseProgress {
-                    id: progress_id.clone(),
-                    state: release_state,
-                    received,
-                    total,
-                });
-            },
+            release_progress(events, id.clone()),
         )
     });
     if result.is_err() {
@@ -323,16 +330,31 @@ fn remove_release_command(id: ReleaseId, events: &EventSink, state: &mut WorkerS
     events.send(Event::ReleaseRemoved(result));
 }
 
+/// The folder that holds backups, the release cache, imports, and helper
+/// staging files.
+#[cfg(windows)]
+fn data_root() -> WorkerResult<PathBuf> {
+    Ok(dlss_platform::windows::WindowsKnownDirectories
+        .local_app_data()?
+        .join("DLSS Updater"))
+}
+
+/// Where a release's downloaded archive and its extracted, validated DLLs
+/// are cached, relative to [`data_root`].
+#[cfg(windows)]
+fn release_cache_paths(id: &ReleaseId) -> WorkerResult<(PathBuf, PathBuf)> {
+    let component = safe_component(&id.0)?;
+    Ok((
+        PathBuf::from("cache/archives").join(format!("{component}.zip")),
+        PathBuf::from("cache/releases").join(component),
+    ))
+}
+
 #[cfg(windows)]
 fn remove_release_files(id: &ReleaseId) -> WorkerResult<()> {
-    let component = safe_component(&id.0)?;
-    let base = dlss_platform::windows::WindowsKnownDirectories
-        .local_app_data()?
-        .join("DLSS Updater/cache");
-    for path in [
-        base.join("archives").join(format!("{component}.zip")),
-        base.join("releases").join(component),
-    ] {
+    let (archive, extracted) = release_cache_paths(id)?;
+    let base = data_root()?;
+    for path in [base.join(archive), base.join(extracted)] {
         if path.is_dir() {
             std::fs::remove_dir_all(path)?;
         } else if path.exists() {
@@ -358,7 +380,6 @@ fn profile_command(
     let Some(game) = begin_game_operation(&id, events, state) else {
         return;
     };
-    let progress_events = events.clone();
     // Persisted catalog records are display metadata, not a trust anchor. Every
     // selected official release is revalidated from its prepared cache before
     // any of its paths or hashes can enter an operation plan.
@@ -396,14 +417,7 @@ fn profile_command(
                     &asset,
                     state,
                     Revalidate::ReuseSession,
-                    |release_state, received, total| {
-                        progress_events.send(Event::ReleaseProgress {
-                            id: release_id.clone(),
-                            state: release_state,
-                            received,
-                            total,
-                        });
-                    },
+                    release_progress(events, release_id.clone()),
                 )
             }) {
                 Ok(release) => {
@@ -421,22 +435,8 @@ fn profile_command(
         .cloned()
         .ok_or_else(|| WorkerError::State("official release metadata is not available".into()));
     let result = asset.and_then(|asset| {
-        let release_id = asset.release.id.clone();
-        apply_profile(
-            &game,
-            &asset,
-            &cached,
-            profile,
-            state,
-            |release_state, received, total| {
-                progress_events.send(Event::ReleaseProgress {
-                    id: release_id.clone(),
-                    state: release_state,
-                    received,
-                    total,
-                });
-            },
-        )
+        let progress = release_progress(events, asset.release.id.clone());
+        apply_profile(&game, &asset, &cached, profile, state, progress)
     });
     finish_game_operation(id, game, result, events, state);
 }
@@ -574,10 +574,7 @@ fn remove_import_command(hash: [u8; 32], events: &EventSink, state: &mut WorkerS
 
 #[cfg(windows)]
 fn import_store() -> WorkerResult<dlss_core::ImportStore> {
-    let root = dlss_platform::windows::WindowsKnownDirectories
-        .local_app_data()?
-        .join("DLSS Updater/imports");
-    Ok(dlss_core::ImportStore::new(root))
+    Ok(dlss_core::ImportStore::new(data_root()?.join("imports")))
 }
 
 #[cfg(not(windows))]
@@ -635,9 +632,8 @@ fn refresh_backups(events: &EventSink) {
 
 #[cfg(windows)]
 fn load_backups() -> WorkerResult<dlss_core::BackupLoadReport> {
-    let base = dlss_platform::windows::WindowsKnownDirectories.local_app_data()?;
     Ok(
-        dlss_core::BackupStore::new(base.join("DLSS Updater/backups")).load_trusted_report(
+        dlss_core::BackupStore::new(data_root()?.join("backups")).load_trusted_report(
             &dlss_platform::windows::WindowsDllInspector,
             &dlss_platform::windows::WindowsTrustVerifier,
         )?,
@@ -824,10 +820,7 @@ fn scan_roots(roots: &[PathBuf]) -> dlss_core::DiscoveryOutcome {
 
 #[cfg(windows)]
 fn catalog_index_path() -> Option<PathBuf> {
-    dlss_platform::windows::WindowsKnownDirectories
-        .local_app_data()
-        .ok()
-        .map(|base| base.join("DLSS Updater/cache/catalog.json"))
+    data_root().ok().map(|base| base.join("cache/catalog.json"))
 }
 
 #[cfg(not(windows))]
@@ -915,9 +908,7 @@ fn prepare_release(
     revalidate: Revalidate,
     progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<(PathBuf, dlss_catalog::ValidatedRelease)> {
-    let base = dlss_platform::windows::WindowsKnownDirectories
-        .local_app_data()?
-        .join("DLSS Updater");
+    let base = data_root()?;
     if revalidate == Revalidate::ReuseSession
         && let Some(prepared) = state.prepared.get(&asset.release.id)
     {
@@ -940,9 +931,8 @@ fn validate_release_cache(
     base: &std::path::Path,
     mut progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<dlss_catalog::ValidatedRelease> {
-    let component = safe_component(&asset.release.id.0)?;
-    let archive = base.join("cache/archives").join(format!("{component}.zip"));
-    let extracted = base.join("cache/releases").join(component);
+    let (archive, extracted) = release_cache_paths(&asset.release.id)?;
+    let (archive, extracted) = (base.join(archive), base.join(extracted));
     tracing::info!(release = %asset.release.tag, archive = %archive.display(), "preparing release");
     let inspector = dlss_platform::windows::WindowsDllInspector;
     let verifier = dlss_platform::windows::WindowsTrustVerifier;
@@ -1147,29 +1137,43 @@ fn elevate_failed(
     base: &std::path::Path,
     swaps: Vec<dlss_core::PlannedSwap>,
 ) -> WorkerResult<dlss_core::BatchResult> {
-    let nonce = operation_nonce();
+    run_helper_plan(base, |nonce, result_path| {
+        dlss_core::ElevatedHelperPlan::FileSwap(dlss_core::ElevatedFilePlan {
+            game_id: game.id.clone(),
+            game_root: game.root.clone(),
+            operation: dlss_core::OperationPlan {
+                nonce: nonce.clone(),
+                swaps,
+            },
+            nonce,
+            result_path,
+        })
+    })
+}
+
+/// Writes an elevated helper plan under `base`, runs the helper on it, and
+/// reads back the result it reports. `plan` receives the nonce and the
+/// result path the helper must write to. Both staging files are removed
+/// afterwards, whatever the outcome.
+#[cfg(windows)]
+fn run_helper_plan<T: serde::de::DeserializeOwned>(
+    base: &std::path::Path,
+    plan: impl FnOnce(String, PathBuf) -> dlss_core::ElevatedHelperPlan,
+) -> WorkerResult<T> {
     let plans = base.join("helper-plans");
     let results = base.join("helper-results");
     std::fs::create_dir_all(&plans)?;
     std::fs::create_dir_all(&results)?;
+    let nonce = operation_nonce();
     let result_path = results.join(format!("{nonce}.json"));
     let plan_path = plans.join(format!("{nonce}.json"));
-    let plan = dlss_core::ElevatedHelperPlan::FileSwap(dlss_core::ElevatedFilePlan {
-        game_id: game.id.clone(),
-        game_root: game.root.clone(),
-        operation: dlss_core::OperationPlan {
-            nonce: nonce.clone(),
-            swaps,
-        },
-        nonce,
-        result_path: result_path.clone(),
-    });
+    let plan = plan(nonce, result_path.clone());
     let outcome = (|| {
         dlss_core::write_versioned_json(&plan_path, 1, &plan)?;
         dlss_platform::windows::WindowsPrivilegeBroker
             .run_elevated(&plan_path)
             .map_err(elevation_error)?;
-        let outcome: Result<dlss_core::BatchResult, String> =
+        let outcome: Result<T, String> =
             dlss_core::read_versioned_json(&result_path, 1).map_err(|error| {
                 WorkerError::Elevation(format!(
                     "the elevated helper did not report a result: {error}"
@@ -1196,53 +1200,22 @@ fn elevation_error(error: dlss_core::CoreError) -> WorkerError {
 /// already resolved the stale-hash confirmation and target state.
 #[cfg(windows)]
 fn change_indicator(request: IndicatorRequest) -> WorkerResult<dlss_core::ToolChangeResult> {
-    let base = dlss_platform::windows::WindowsKnownDirectories
-        .local_app_data()?
-        .join("DLSS Updater");
-    let plans = base.join("helper-plans");
-    let results = base.join("helper-results");
-    std::fs::create_dir_all(&plans)?;
-    std::fs::create_dir_all(&results)?;
-    let nonce = operation_nonce();
-    let result_path = results.join(format!("{nonce}.json"));
-    let plan_path = plans.join(format!("{nonce}.json"));
-    let plan = dlss_core::ToolChangePlan {
-        tool_id: dlss_core::SystemToolId(dlss_core::DLSS_INDICATOR_TOOL_ID.into()),
-        desired: request.desired,
-        restore_point: request.restore_point,
-        expected_current_hash: request.expected_current_hash,
-        nonce,
-        result_path: result_path.clone(),
-        allow_stale_restore: request.allow_stale_restore,
-    };
-    let outcome = (|| {
-        dlss_core::write_versioned_json(
-            &plan_path,
-            1,
-            &dlss_core::ElevatedHelperPlan::SystemTool(plan),
-        )?;
-        dlss_platform::windows::WindowsPrivilegeBroker
-            .run_elevated(&plan_path)
-            .map_err(elevation_error)?;
-        let outcome: Result<dlss_core::ToolChangeResult, String> =
-            dlss_core::read_versioned_json(&result_path, 1).map_err(|error| {
-                WorkerError::Elevation(format!(
-                    "the elevated helper did not report a result: {error}"
-                ))
-            })?;
-        outcome.map_err(|message| {
-            WorkerError::Elevation(format!("the elevated helper rejected the plan: {message}"))
+    run_helper_plan(&data_root()?, |nonce, result_path| {
+        dlss_core::ElevatedHelperPlan::SystemTool(dlss_core::ToolChangePlan {
+            tool_id: dlss_core::SystemToolId(dlss_core::DLSS_INDICATOR_TOOL_ID.into()),
+            desired: request.desired,
+            restore_point: request.restore_point,
+            expected_current_hash: request.expected_current_hash,
+            nonce,
+            result_path,
+            allow_stale_restore: request.allow_stale_restore,
         })
-    })();
-    cleanup_helper_files(&plan_path, &result_path);
-    outcome
+    })
 }
 
 #[cfg(windows)]
 fn undo_game(_game: &GameInstall, plan: &dlss_core::OperationPlan) -> WorkerResult<UpgradeReport> {
-    let base = dlss_platform::windows::WindowsKnownDirectories
-        .local_app_data()?
-        .join("DLSS Updater");
+    let base = data_root()?;
     let result = dlss_core::execute_plan(
         plan,
         &dlss_platform::windows::WindowsDllInspector,
