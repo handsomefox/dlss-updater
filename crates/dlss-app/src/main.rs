@@ -941,8 +941,8 @@ impl DlssApp {
                     )
                     .color(theme::TEXT_MUTED),
                 );
-                ui.add_space(8.0);
                 if !self.capabilities.system_tools {
+                    ui.add_space(8.0);
                     widgets::status_text(
                         ui,
                         icons::INFO,
@@ -951,11 +951,33 @@ impl DlssApp {
                     );
                     return;
                 }
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Now:").color(theme::TEXT_MUTED));
-                    ui.strong(state_label(&self.tool_state));
-                });
-                ui.add_space(4.0);
+                ui.separator();
+                // One label rather than a horizontal row, which is a button
+                // tall and would leave more air under the separator than over
+                // the next one.
+                let mut now = egui::text::LayoutJob::default();
+                let style = ui.style();
+                egui::RichText::new("Now:")
+                    .color(theme::TEXT_MUTED)
+                    .append_to(
+                        &mut now,
+                        style,
+                        egui::FontSelection::Default,
+                        egui::Align::Center,
+                    );
+                let state = now.sections.len();
+                egui::RichText::new(state_label(&self.tool_state))
+                    .strong()
+                    .append_to(
+                        &mut now,
+                        style,
+                        egui::FontSelection::Default,
+                        egui::Align::Center,
+                    );
+                // The gap two labels in a row would have.
+                now.sections[state].leading_space = ui.spacing().item_spacing.x;
+                ui.label(now);
+                ui.separator();
                 widgets::radio_value(ui, &mut self.staged_tool_state, SystemToolState::Off, "Off");
                 widgets::radio_value(
                     ui,
