@@ -16,9 +16,9 @@ path = "src/main.rs"
 [dependencies]
 app-update.workspace = true
 crossbeam-channel.workspace = true
-dlss-catalog = { version = "=1.4.5", path = "../dlss-catalog" }
-dlss-core = { version = "=1.4.5", path = "../dlss-core" }
-dlss-platform = { version = "=1.4.5", path = "../dlss-platform" }
+dlss-catalog = { version = "=1.4.6", path = "../dlss-catalog" }
+dlss-core = { version = "=1.4.6", path = "../dlss-core" }
+dlss-platform = { version = "=1.4.6", path = "../dlss-platform" }
 eframe.workspace = true
 egui_extras.workspace = true
 jiff.workspace = true

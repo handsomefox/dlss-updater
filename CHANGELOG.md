@@ -2,6 +2,22 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.4.6
+
+- Line up icons, tab counts, and the search box with the text and controls beside them, and even
+  out the spacing in **About**, **App updates**, **DLL sources**, and **Tools**. The close button
+  on every dialog is larger. Thanks to @groozchique for these in #27.
+- Rename **App updates…** in **About** to **Check for updates**. It now starts a check as it opens
+  **App updates**, unless one is already running. Also from @groozchique in #27.
+- Make the **Older**, **Streamline**, **Known risk**, and **Indicator on** chips as tall as the
+  badges beside them. They made their rows taller, and grew the toolbar while the DLSS indicator
+  was on.
+- Put the count after **DLSS up to date** on the same line as the status, and tighten the space
+  around the release headings in **App updates**.
+- Get the self-updater from its own repository,
+  [handsomefox/app-update](https://github.com/handsomefox/app-update), instead of a copy inside
+  this app. Checking for, downloading, and installing an update work as before.
+
 ## 1.4.5
 
 - Keep GitHub's error page out of the banner when a catalog refresh or a download fails. During
