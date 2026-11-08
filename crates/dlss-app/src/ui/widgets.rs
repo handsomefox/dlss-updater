@@ -3,6 +3,13 @@
 use super::theme::{self, icons};
 use eframe::egui;
 
+/// Size of the label in an icon-and-label line, the theme's body size.
+pub(crate) const LABEL_SIZE: f32 = 14.0;
+
+/// Size of the icon beside a [`LABEL_SIZE`] label. Phosphor glyphs read a
+/// little small at the label's size.
+pub(crate) const LABEL_ICON_SIZE: f32 = LABEL_SIZE + 1.0;
+
 pub(crate) fn icon_text(icon: &str, label: &str) -> egui::WidgetText {
     colored_icon_text(icon, label, None)
 }
@@ -10,27 +17,51 @@ pub(crate) fn icon_text(icon: &str, label: &str) -> egui::WidgetText {
 fn colored_icon_text(icon: &str, label: &str, color: Option<egui::Color32>) -> egui::WidgetText {
     let mut job = egui::text::LayoutJob::default();
     let color = color.unwrap_or(egui::Color32::PLACEHOLDER);
-    job.append(
-        icon,
-        0.0,
-        egui::TextFormat {
-            font_id: theme::icon_font(15.0),
-            color,
-            ..Default::default()
-        },
-    );
+    job.append(icon, 0.0, icon_format(LABEL_ICON_SIZE, color, LABEL_SIZE));
     if !label.is_empty() {
         job.append(
             label,
             5.0,
             egui::TextFormat {
-                font_id: egui::FontId::new(14.0, egui::FontFamily::Proportional),
+                font_id: egui::FontId::new(LABEL_SIZE, egui::FontFamily::Proportional),
                 color,
                 ..Default::default()
             },
         );
     }
     job.into()
+}
+
+/// The icon section of an icon-and-label line, beside Inter text of size
+/// `beside`.
+///
+/// Each Phosphor glyph is drawn centered in its em box, and Inter's line box
+/// is centered on its cap height, so an icon centered in the label's line box
+/// lines up with the capitals. egui centers a section in an explicit line
+/// height, so the icon gets the label's. Left to egui's alignment, the icon
+/// sat low: by default sections line up at the bottom of their line boxes,
+/// and Phosphor's descent is a quarter of Inter's. Centering with `valign`
+/// fixed most of that, but the row height is rounded to whole pixels and the
+/// rounding then moved the label and the icon by different amounts.
+pub(crate) fn icon_format(size: f32, color: egui::Color32, beside: f32) -> egui::TextFormat {
+    let (ascent, descent) = inter_metrics(beside);
+    egui::TextFormat {
+        font_id: theme::icon_font(size),
+        color,
+        line_height: Some(ascent + descent),
+        ..Default::default()
+    }
+}
+
+/// Inter's ascent and descent at `size`, rounded the way egui rounds font
+/// metrics. The regular and semibold weights share them.
+fn inter_metrics(size: f32) -> (f32, f32) {
+    use egui::emath::GuiRounding as _;
+    // In units of Inter's 2048-unit em, from the font's `hhea` table.
+    (
+        (1984.0 / 2048.0 * size).round_ui(),
+        (494.0 / 2048.0 * size).round_ui(),
+    )
 }
 
 pub(crate) fn primary_button(label: impl Into<String>) -> egui::Button<'static> {
@@ -51,15 +82,7 @@ pub(crate) fn colored_icon_label(
     size: f32,
 ) -> egui::WidgetText {
     let mut job = egui::text::LayoutJob::default();
-    job.append(
-        icon,
-        0.0,
-        egui::TextFormat {
-            font_id: theme::icon_font(size + 1.0),
-            color,
-            ..Default::default()
-        },
-    );
+    job.append(icon, 0.0, icon_format(size + 1.0, color, size));
     job.append(
         label,
         5.0,
@@ -598,6 +621,59 @@ mod tests {
         ));
         assert_eq!(explicit.len(), 2);
         assert!(explicit.iter().all(|color| *color == theme::TEXT_ON_ACCENT));
+    }
+
+    /// Screen scales from 100% to 200%, where rounding to whole pixels
+    /// differs from one to the next.
+    const SCALES: [f32; 5] = [1.0, 1.25, 1.5, 1.75, 2.0];
+
+    /// Lays `text` out with the app's fonts at `pixels_per_point` and returns
+    /// the glyphs of its first row.
+    fn glyphs(text: egui::WidgetText, pixels_per_point: f32) -> Vec<egui::epaint::text::Glyph> {
+        let egui::WidgetText::LayoutJob(job) = text else {
+            panic!("expected a layout job");
+        };
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let mut input = egui::RawInput::default();
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(pixels_per_point);
+        // The first pass loads the fonts. Nothing is drawn, so the font
+        // atlas upload is dropped.
+        ctx.run_ui(input, |_| {}).textures_delta.clear();
+        let galley = ctx.fonts_mut(|fonts| fonts.layout_job((*job).clone()));
+        galley.rows[0].glyphs.clone()
+    }
+
+    #[test]
+    fn icons_are_centered_on_the_label_capitals() {
+        // Inter's cap height, in units of its 2048-unit em.
+        const CAP_HEIGHT: f32 = 1490.0 / 2048.0;
+        for scale in SCALES {
+            for (text, label_size) in [
+                (icon_text(icons::FOLDER_PLUS, "Add folder"), LABEL_SIZE),
+                (
+                    colored_icon_label(icons::CHECK_CIRCLE, "Streamline", theme::ACCENT, 12.5),
+                    12.5,
+                ),
+            ] {
+                let glyphs = glyphs(text, scale);
+                let (icon, label) = (&glyphs[0], &glyphs[1]);
+                // Phosphor draws each icon centered in its em box, which is
+                // also its line box.
+                let icon_center =
+                    icon.pos.y - (2.0 * icon.font_face_ascent - icon.font_face_height) / 2.0;
+                let caps_center = label.pos.y - CAP_HEIGHT * label_size / 2.0;
+                let off_by = (icon_center - caps_center) * scale;
+                assert!(
+                    off_by.abs() <= 0.5,
+                    "icon is {off_by} px off the capitals at {scale}x"
+                );
+            }
+        }
     }
 
     #[test]
