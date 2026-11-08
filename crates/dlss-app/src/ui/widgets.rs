@@ -495,13 +495,11 @@ pub(crate) fn chip(
     label: &str,
     color: egui::Color32,
 ) -> egui::Response {
+    // One label, as in a badge. A horizontal row inside the pill would make
+    // it a button tall and push the rest of its row down.
     pill_frame(color)
         .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                ui.label(self::icon(icon, 12.0, color));
-                ui.label(egui::RichText::new(label).color(color).size(11.5));
-            });
+            ui.label(colored_icon_label(icon, label, color, 11.5));
         })
         .response
 }
@@ -688,6 +686,40 @@ mod tests {
         ctx.run_ui(input, |_| {}).textures_delta.clear();
         let galley = ctx.fonts_mut(|fonts| fonts.layout_job((*job).clone()));
         galley.rows[0].glyphs.clone()
+    }
+
+    #[test]
+    fn chips_are_as_tall_as_badges() {
+        for scale in SCALES {
+            let ctx = egui::Context::default();
+            theme::apply(&ctx);
+            let (mut chip, mut badge) = (0.0, 0.0);
+            // The first pass loads the fonts.
+            for _ in 0..2 {
+                let mut input = egui::RawInput::default();
+                input
+                    .viewports
+                    .entry(egui::ViewportId::ROOT)
+                    .or_default()
+                    .native_pixels_per_point = Some(scale);
+                ctx.run_ui(input, |ui| {
+                    chip = super::chip(ui, icons::WARNING, "Streamline", theme::WARNING)
+                        .rect
+                        .height();
+                    badge = ui
+                        .scope(|ui| super::badge(ui, "Latest", theme::ACCENT))
+                        .response
+                        .rect
+                        .height();
+                })
+                .textures_delta
+                .clear();
+            }
+            assert!(
+                (chip - badge).abs() < 1e-3,
+                "chip is {chip} pt tall and badge {badge} pt at {scale}x"
+            );
+        }
     }
 
     #[test]
