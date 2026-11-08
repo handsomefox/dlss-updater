@@ -615,7 +615,11 @@ impl DlssApp {
         {
             release.state = state;
         }
-        self.release_progress = Some((id.clone(), received, total));
+        // An update can validate other releases while this one waits its
+        // turn; only the requested download's own progress is shown.
+        if self.inspecting_release.as_ref() == Some(id) {
+            self.release_progress = Some((id.clone(), received, total));
+        }
         self.notify(ToastKind::Progress, progress_label(state, received, total));
     }
 
