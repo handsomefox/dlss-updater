@@ -315,10 +315,9 @@ impl DlssApp {
             return;
         }
         for (game_id, profile) in per_game {
-            let _ = self
-                .worker
-                .commands
-                .send(Command::ApplyProfile(game_id, profile));
+            if !self.send(Command::ApplyProfile(game_id, profile)) {
+                break;
+            }
         }
     }
 }

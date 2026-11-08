@@ -175,7 +175,7 @@ impl DlssApp {
                     .on_hover_text("Look for games again (F5)")
                     .clicked()
                 {
-                    let _ = self.worker.commands.send(Command::Scan);
+                    self.send(Command::Scan);
                 }
             });
         });

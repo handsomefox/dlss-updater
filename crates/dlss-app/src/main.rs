@@ -402,14 +402,7 @@ impl DlssApp {
                 Err(crossbeam_channel::TryRecvError::Empty) => break,
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     if self.runtime.worker_connected {
-                        self.runtime.worker_connected = false;
-                        self.runtime.scanning = false;
-                        self.runtime.catalog_loading = false;
-                        self.backups_loading = false;
-                        self.release_download = None;
-                        self.run = None;
-                        self.toast = None;
-                        self.last_error = Some("Background worker stopped unexpectedly".into());
+                        self.worker_lost();
                     }
                     break;
                 }
@@ -839,7 +832,9 @@ impl DlssApp {
             return;
         }
         for game_id in games {
-            let _ = self.worker.commands.send(Command::UndoLast(game_id));
+            if !self.send(Command::UndoLast(game_id)) {
+                break;
+            }
         }
     }
 
@@ -849,7 +844,7 @@ impl DlssApp {
             id: id.clone(),
             progress: None,
         });
-        let _ = self.worker.commands.send(Command::InspectRelease(id));
+        self.send(Command::InspectRelease(id));
     }
 
     fn game_name(&self, game_id: &dlss_core::GameId) -> String {
@@ -1143,7 +1138,7 @@ impl DlssApp {
             ctx.memory_mut(|memory| memory.request_focus(ui::toolbar::search_field_id()));
         }
         if rescan && !self.runtime.scanning {
-            let _ = self.worker.commands.send(Command::Scan);
+            self.send(Command::Scan);
         }
         match self.view {
             View::Game(_) if escape => self.view = View::Library,
@@ -1276,10 +1271,7 @@ impl DlssApp {
         self.persisted
             .custom_roots
             .retain(|existing| existing != root);
-        let _ = self
-            .worker
-            .commands
-            .send(Command::RemoveRoot(root.to_path_buf()));
+        self.send(Command::RemoveRoot(root.to_path_buf()));
     }
 
     /// Asks for a game folder and adds it. The picker blocks until the user
@@ -1296,7 +1288,7 @@ impl DlssApp {
                 if !self.persisted.custom_roots.contains(&root) {
                     self.persisted.custom_roots.push(root.clone());
                 }
-                let _ = self.worker.commands.send(Command::AddRoot(root));
+                self.send(Command::AddRoot(root));
             }
             Err(error) => {
                 self.last_error = Some(format!("Could not add {}: {error}", root.display()));
@@ -1405,7 +1397,7 @@ impl DlssApp {
                 "Changing the DLSS indicator…"
             },
         );
-        let _ = self.worker.commands.send(Command::ChangeIndicator(request));
+        self.send(Command::ChangeIndicator(request));
     }
 
     fn clear_game_profile(&mut self, game_id: &dlss_core::GameId) {
@@ -1438,10 +1430,32 @@ impl DlssApp {
 
     fn refresh_backups(&mut self) {
         self.backups_loading = true;
-        if self.worker.commands.send(Command::RefreshBackups).is_err() {
-            self.backups_loading = false;
+        if !self.send(Command::RefreshBackups) {
             self.backup_warning = Some("Background worker stopped unexpectedly".into());
         }
+    }
+
+    /// Sends a command to the worker. When the worker has stopped, clears
+    /// every pending state the caller may have just set, so nothing waits
+    /// forever for an answer that cannot come, and returns false.
+    pub(crate) fn send(&mut self, command: Command) -> bool {
+        if self.worker.commands.send(command).is_ok() {
+            return true;
+        }
+        self.worker_lost();
+        false
+    }
+
+    /// Ends everything that waits on the worker, once it has stopped.
+    fn worker_lost(&mut self) {
+        self.runtime.worker_connected = false;
+        self.runtime.scanning = false;
+        self.runtime.catalog_loading = false;
+        self.backups_loading = false;
+        self.release_download = None;
+        self.run = None;
+        self.toast = None;
+        self.last_error = Some("Background worker stopped unexpectedly".into());
     }
 
     fn profile_for_game(&self, game_id: &dlss_core::GameId) -> dlss_core::TargetProfile {

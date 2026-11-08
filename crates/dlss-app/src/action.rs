@@ -90,21 +90,21 @@ impl DlssApp {
             Action::CloseReview => self.review = None,
             Action::DownloadRelease(id) => self.start_release_download(id),
             Action::RemoveRelease(id) => {
-                let _ = self.worker.commands.send(Command::RemoveRelease(id));
+                self.send(Command::RemoveRelease(id));
             }
             Action::RefreshCatalog => {
-                let _ = self.worker.commands.send(Command::RefreshCatalog);
+                self.send(Command::RefreshCatalog);
             }
             Action::ImportDll => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter("Windows DLL", &["dll"])
                     .pick_file()
                 {
-                    let _ = self.worker.commands.send(Command::ImportDll(path));
+                    self.send(Command::ImportDll(path));
                 }
             }
             Action::RemoveImport(hash) => {
-                let _ = self.worker.commands.send(Command::RemoveImport(hash));
+                self.send(Command::RemoveImport(hash));
             }
             Action::AddFolder => self.pick_and_add_custom_root(),
             Action::RemoveFolder(root) => self.remove_custom_root(&root),
