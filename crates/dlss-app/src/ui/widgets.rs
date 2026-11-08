@@ -417,13 +417,9 @@ pub(crate) fn card<R>(
 
 /// Rounded pill with a tinted background, e.g. version numbers or counts.
 pub(crate) fn badge(ui: &mut egui::Ui, text: impl Into<egui::RichText>, color: egui::Color32) {
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.16))
-        .corner_radius(egui::CornerRadius::same(9))
-        .inner_margin(egui::Margin::symmetric(8, 2))
-        .show(ui, |ui| {
-            ui.label(text.into().color(color).size(11.5));
-        });
+    pill_frame(color).show(ui, |ui| {
+        ui.label(text.into().color(color).size(11.5));
+    });
 }
 
 /// Icon + short label in a tinted pill; the generic form behind the
@@ -434,10 +430,7 @@ pub(crate) fn chip(
     label: &str,
     color: egui::Color32,
 ) -> egui::Response {
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.16))
-        .corner_radius(egui::CornerRadius::same(9))
-        .inner_margin(egui::Margin::symmetric(8, 2))
+    pill_frame(color)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -446,6 +439,14 @@ pub(crate) fn chip(
             });
         })
         .response
+}
+
+/// The tinted, rounded surface behind [`badge`] and [`chip`].
+fn pill_frame(color: egui::Color32) -> egui::Frame {
+    egui::Frame::new()
+        .fill(color.gamma_multiply(0.16))
+        .corner_radius(egui::CornerRadius::same(9))
+        .inner_margin(egui::Margin::symmetric(8, 2))
 }
 
 /// Accent-colored icon next to a heading, for titling view sections.
