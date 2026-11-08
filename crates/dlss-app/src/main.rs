@@ -1,10 +1,12 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod action;
 mod diagnostics;
 mod state;
 mod ui;
 mod worker;
 
+use action::Action;
 #[cfg(windows)]
 use dlss_core::SystemToolProvider;
 use dlss_core::{PlatformCapabilities, SystemToolState};
@@ -792,6 +794,13 @@ impl DlssApp {
         self.last_change = batch.undoable;
     }
 
+    /// Reverts the most recent finished update, which the toast and the
+    /// footer offer to undo.
+    pub(crate) fn undo_last_change(&mut self) {
+        let games = std::mem::take(&mut self.last_change);
+        self.start_undo(games);
+    }
+
     /// Reverts the last change in each game, through the worker's undo plans.
     fn start_undo(&mut self, games: Vec<dlss_core::GameId>) {
         if self.busy() {
@@ -895,8 +904,7 @@ impl DlssApp {
 
     fn tools_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::Tools);
-        let mut apply = false;
-        let mut restore = false;
+        let mut actions = Vec::new();
         widgets::modal(
             ctx,
             widgets::dialog("tools", icons::WRENCH, "Tools", 520.0),
@@ -946,32 +954,33 @@ impl DlssApp {
                 ui.add_space(10.0);
                 widgets::button_row(ui, |ui| {
                     let changed = self.staged_tool_state != self.tool_state;
-                    apply = ui
+                    if ui
                         .add_enabled(
                             changed,
                             widgets::primary_when(changed, icons::CHECK, "Apply"),
                         )
                         .on_disabled_hover_text("Choose a different setting to apply")
-                        .clicked();
+                        .clicked()
+                    {
+                        actions.push(Action::ChangeIndicator { restore: false });
+                    }
                     #[cfg(windows)]
                     let can_restore = !self.persisted.tool_restore_points.is_empty();
                     #[cfg(not(windows))]
                     let can_restore = false;
-                    restore = ui
+                    if ui
                         .add_enabled(can_restore, egui::Button::new("Restore previous"))
                         .on_hover_text("Put back the setting from before the last change")
                         .on_disabled_hover_text("The app has not changed this setting yet")
-                        .clicked();
+                        .clicked()
+                    {
+                        actions.push(Action::ChangeIndicator { restore: true });
+                    }
                 });
             },
         );
-        if apply {
-            self.change_indicator(false);
-        }
-        if restore {
-            self.change_indicator(true);
-        }
         self.set_window_open(AppWindow::Tools, open);
+        self.apply_all(ctx, actions);
     }
 
     fn activity_window(&mut self, ctx: &egui::Context) {
@@ -1020,7 +1029,7 @@ impl DlssApp {
 
     fn roots_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::Roots);
-        let mut remove = None;
+        let mut actions = Vec::new();
         widgets::modal(
             ctx,
             widgets::dialog("roots", icons::FOLDER_SIMPLE, "Game folders", 640.0),
@@ -1043,12 +1052,13 @@ impl DlssApp {
                 ui.horizontal(|ui| {
                     ui.strong("Your folders");
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Added at once, so the new folder is listed below
+                        // in this same frame.
                         if ui
                             .button(widgets::icon_text(icons::FOLDER_PLUS, "Add folder…"))
                             .clicked()
-                            && let Some(root) = rfd::FileDialog::new().pick_folder()
                         {
-                            self.add_custom_root(&root);
+                            self.pick_and_add_custom_root();
                         }
                     });
                 });
@@ -1067,17 +1077,15 @@ impl DlssApp {
                                 ui.separator();
                             }
                             if folder_row(ui, root) {
-                                remove = Some(root.clone());
+                                actions.push(Action::RemoveFolder(root.clone()));
                             }
                         }
                     });
                 }
             },
         );
-        if let Some(root) = remove {
-            self.remove_custom_root(&root);
-        }
         self.set_window_open(AppWindow::Roots, open);
+        self.apply_all(ctx, actions);
     }
 
     /// Keyboard shortcuts.
@@ -1227,7 +1235,15 @@ impl DlssApp {
             .send(Command::RemoveRoot(root.to_path_buf()));
     }
 
-    pub(crate) fn add_custom_root(&mut self, root: &std::path::Path) {
+    /// Asks for a game folder and adds it. The picker blocks until the user
+    /// chooses, as a native file dialog does.
+    pub(crate) fn pick_and_add_custom_root(&mut self) {
+        if let Some(root) = rfd::FileDialog::new().pick_folder() {
+            self.add_custom_root(&root);
+        }
+    }
+
+    fn add_custom_root(&mut self, root: &std::path::Path) {
         match root.canonicalize() {
             Ok(root) => {
                 if !self.persisted.custom_roots.contains(&root) {

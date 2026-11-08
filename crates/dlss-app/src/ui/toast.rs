@@ -6,7 +6,7 @@
 use super::footer::FOOTER_HEIGHT;
 use super::theme::{self, icons};
 use super::widgets;
-use crate::DlssApp;
+use crate::{Action, DlssApp};
 use eframe::egui;
 use std::time::{Duration, Instant};
 
@@ -159,8 +159,7 @@ impl DlssApp {
         let Some(toast) = &mut self.toast else {
             return;
         };
-        let mut dismiss = false;
-        let mut undo = false;
+        let mut actions = Vec::new();
         let can_undo = toast.offers_undo && !self.last_change.is_empty() && !busy;
         let response = egui::Area::new(egui::Id::unique("toast"))
             .anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -(FOOTER_HEIGHT + 12.0)])
@@ -189,16 +188,18 @@ impl DlssApp {
                                 }
                             }
                             ui.add(egui::Label::new(&toast.message).wrap());
-                            if can_undo {
-                                undo = ui
+                            if can_undo
+                                && ui
                                     .add(widgets::primary_icon_button(
                                         icons::ARROW_U_UP_LEFT,
                                         "Undo",
                                     ))
-                                    .clicked();
+                                    .clicked()
+                            {
+                                actions.extend([Action::DismissToast, Action::UndoLastChange]);
                             }
-                            if toast.kind != ToastKind::Progress {
-                                dismiss = ui
+                            if toast.kind != ToastKind::Progress
+                                && ui
                                     .add(
                                         egui::Button::new(widgets::icon(
                                             icons::X,
@@ -208,7 +209,11 @@ impl DlssApp {
                                         .frame(false),
                                     )
                                     .on_hover_text("Dismiss")
-                                    .clicked();
+                                    .clicked()
+                            {
+                                // First, as when Undo was also clicked:
+                                // the undo's progress notice must stay.
+                                actions.insert(0, Action::DismissToast);
                             }
                         });
                     });
@@ -221,13 +226,7 @@ impl DlssApp {
         if toast.kind != ToastKind::Progress {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
-        if dismiss || undo {
-            self.toast = None;
-        }
-        if undo {
-            let games = std::mem::take(&mut self.last_change);
-            self.start_undo(games);
-        }
+        self.apply_all(ctx, actions);
     }
 }
 

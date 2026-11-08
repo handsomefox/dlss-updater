@@ -6,7 +6,7 @@ use super::theme::{self, icons};
 use super::widgets;
 use super::windows::format_timestamp;
 use crate::ui::review::ReviewIntent;
-use crate::{DlssApp, View};
+use crate::{Action, DlssApp, View};
 use eframe::egui;
 
 pub(crate) fn dll_kind_rank(file_name: &std::ffi::OsStr) -> u8 {
@@ -57,27 +57,15 @@ impl DlssApp {
             self.view = View::Library;
             return;
         };
-        let mut requested_review = None;
-        let mut go_back = false;
-        self.detail_header(ui, index, &mut go_back, &mut requested_review);
+        let mut actions = Vec::new();
+        self.detail_header(ui, index, &mut actions);
         self.dll_table(ui, index);
-        if go_back {
-            self.view = View::Library;
-        }
-        if let Some(intent) = requested_review {
-            self.open_review(intent);
-        }
+        self.apply_all(&ui.ctx().clone(), actions);
     }
 
     /// The page title: back link, game name, where it lives, and the two
     /// update actions, closed off from the DLL table by a rule.
-    fn detail_header(
-        &self,
-        ui: &mut egui::Ui,
-        index: usize,
-        go_back: &mut bool,
-        requested_review: &mut Option<ReviewIntent>,
-    ) {
+    fn detail_header(&self, ui: &mut egui::Ui, index: usize, actions: &mut Vec<Action>) {
         let game = &self.games[index];
         if ui
             .add(
@@ -92,7 +80,7 @@ impl DlssApp {
             .on_hover_text("Back to the library (Esc)")
             .clicked()
         {
-            *go_back = true;
+            actions.push(Action::ShowLibrary);
         }
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
@@ -153,7 +141,7 @@ impl DlssApp {
                 });
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.detail_actions(ui, index, requested_review);
+                self.detail_actions(ui, index, actions);
             });
         });
         ui.add_space(10.0);
@@ -168,12 +156,7 @@ impl DlssApp {
 
     /// Update buttons at the right of the game header, or a spinner while
     /// this game is being changed.
-    fn detail_actions(
-        &self,
-        ui: &mut egui::Ui,
-        index: usize,
-        requested_review: &mut Option<ReviewIntent>,
-    ) {
+    fn detail_actions(&self, ui: &mut egui::Ui, index: usize, actions: &mut Vec<Action>) {
         let game = &self.games[index];
         let in_flight = self.game_activity(&game.id).is_some();
         let can_update = self.catalog_release.is_some() && game.dlls > 0 && !self.busy();
@@ -198,7 +181,9 @@ impl DlssApp {
             .on_disabled_hover_text(reason)
             .clicked()
         {
-            *requested_review = Some(ReviewIntent::QuickDlss(vec![game.id.clone()]));
+            actions.push(Action::Review(ReviewIntent::QuickDlss(vec![
+                game.id.clone(),
+            ])));
         }
         if ui
             .add_enabled(
@@ -209,7 +194,7 @@ impl DlssApp {
             .on_disabled_hover_text(reason)
             .clicked()
         {
-            *requested_review = Some(ReviewIntent::AllDlls(vec![game.id.clone()]));
+            actions.push(Action::Review(ReviewIntent::AllDlls(vec![game.id.clone()])));
         }
     }
 

@@ -5,29 +5,21 @@ use super::theme::{self, icons};
 use super::toast::plural;
 use super::widgets;
 use super::windows::format_date;
-use crate::{AppWindow, Command, DlssApp};
+use crate::{Action, AppWindow, DlssApp};
 use eframe::egui;
-
-enum ReleaseAction {
-    Download(dlss_core::ReleaseId),
-    Remove(dlss_core::ReleaseId),
-}
 
 impl DlssApp {
     pub(crate) fn releases_window(&mut self, ctx: &egui::Context) {
         let mut open = self.open_windows.contains(&AppWindow::Releases);
-        let mut action = None;
-        let mut remove_import = None;
-        let mut refresh = false;
-        let mut import = false;
+        let mut actions = Vec::new();
         widgets::modal(
             ctx,
             widgets::dialog("releases", icons::PACKAGE, "DLL sources", 660.0),
             &mut open,
             |ui| {
-                refresh = self.official_releases(ui, &mut action);
+                self.official_releases(ui, &mut actions);
                 ui.add_space(16.0);
-                import = widgets::section_title(
+                if widgets::section_title(
                     ui,
                     "Imported DLLs",
                     Some((
@@ -35,7 +27,9 @@ impl DlssApp {
                         "Pick a DLL file from your disk",
                         true,
                     )),
-                );
+                ) {
+                    actions.push(Action::ImportDll);
+                }
                 ui.label(
                     egui::RichText::new(
                         "Use a DLL you already have, such as one from another game. \
@@ -45,36 +39,16 @@ impl DlssApp {
                     .color(theme::TEXT_MUTED),
                 );
                 ui.add_space(6.0);
-                remove_import = self.imported_dlls(ui);
+                self.imported_dlls(ui, &mut actions);
             },
         );
-        if refresh {
-            let _ = self.worker.commands.send(Command::RefreshCatalog);
-        }
-        if import
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("Windows DLL", &["dll"])
-                .pick_file()
-        {
-            let _ = self.worker.commands.send(Command::ImportDll(path));
-        }
-        match action {
-            Some(ReleaseAction::Download(id)) => self.start_release_download(id),
-            Some(ReleaseAction::Remove(id)) => {
-                let _ = self.worker.commands.send(Command::RemoveRelease(id));
-            }
-            None => {}
-        }
-        if let Some(hash) = remove_import {
-            let _ = self.worker.commands.send(Command::RemoveImport(hash));
-        }
         self.set_window_open(AppWindow::Releases, open);
+        self.apply_all(ctx, actions);
     }
 
-    /// Returns true when the user asked to check GitHub again.
-    fn official_releases(&self, ui: &mut egui::Ui, action: &mut Option<ReleaseAction>) -> bool {
+    fn official_releases(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let loading = self.runtime.catalog_loading;
-        let refresh = widgets::section_title(
+        if widgets::section_title(
             ui,
             "Official releases",
             Some((
@@ -89,7 +63,9 @@ impl DlssApp {
                 "Ask GitHub for new Streamline releases",
                 !loading,
             )),
-        );
+        ) {
+            actions.push(Action::RefreshCatalog);
+        }
         ui.label(
             egui::RichText::new(
                 "NVIDIA's Streamline SDK releases on GitHub. Games are compared against the \
@@ -114,7 +90,7 @@ impl DlssApp {
             );
         }
         if self.releases.is_empty() {
-            return refresh;
+            return;
         }
         let busy = self.release_download.is_some();
         widgets::card(ui, |ui| {
@@ -136,21 +112,18 @@ impl DlssApp {
                     progress,
                     error: self.release_errors.get(id),
                 };
-                if let Some(requested) = ui.push_id(id, |ui| row.show(ui)).inner {
-                    *action = Some(requested);
+                if let Some(action) = ui.push_id(id, |ui| row.show(ui)).inner {
+                    actions.push(action);
                 }
             }
         });
-        refresh
     }
 
-    /// Returns the hash of an import the user asked to remove.
-    fn imported_dlls(&self, ui: &mut egui::Ui) -> Option<[u8; 32]> {
+    fn imported_dlls(&self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         if self.imports.is_empty() {
             ui.label(egui::RichText::new("Nothing imported.").color(theme::TEXT_FAINT));
-            return None;
+            return;
         }
-        let mut remove = None;
         widgets::card(ui, |ui| {
             for (position, record) in self.imports.iter().enumerate() {
                 if position > 0 {
@@ -186,14 +159,13 @@ impl DlssApp {
                                 .on_hover_text("Delete this imported copy")
                                 .clicked()
                             {
-                                remove = Some(record.sha256);
+                                actions.push(Action::RemoveImport(record.sha256));
                             }
                         });
                     });
                 });
             }
         });
-        remove
     }
 }
 
@@ -208,7 +180,7 @@ struct ReleaseRow<'a> {
 }
 
 impl ReleaseRow<'_> {
-    fn show(&self, ui: &mut egui::Ui) -> Option<ReleaseAction> {
+    fn show(&self, ui: &mut egui::Ui) -> Option<Action> {
         let release = self.release;
         let mut action = None;
         ui.horizontal(|ui| {
@@ -263,7 +235,7 @@ impl ReleaseRow<'_> {
     }
 
     /// Right-to-left: the button first, then the state to its left.
-    fn state_and_action(&self, ui: &mut egui::Ui) -> Option<ReleaseAction> {
+    fn state_and_action(&self, ui: &mut egui::Ui) -> Option<Action> {
         let release = self.release;
         let id = release.metadata.id.clone();
         if let Some((received, total)) = self.progress {
@@ -302,7 +274,7 @@ impl ReleaseRow<'_> {
                         );
                     }
                 });
-                remove.then_some(ReleaseAction::Remove(id))
+                remove.then_some(Action::RemoveRelease(id))
             }
             state => {
                 let failed = state == dlss_core::ReleaseState::Invalid || self.error.is_some();
@@ -320,7 +292,7 @@ impl ReleaseRow<'_> {
                 if failed {
                     widgets::status_text(ui, icons::WARNING_CIRCLE, "Failed", theme::DANGER);
                 }
-                clicked.then_some(ReleaseAction::Download(id))
+                clicked.then_some(Action::DownloadRelease(id))
             }
         }
     }

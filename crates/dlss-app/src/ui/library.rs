@@ -7,87 +7,54 @@ use super::toast::plural;
 use super::widgets::{self, TriState};
 use crate::ui::review::ReviewIntent;
 use crate::{
-    Command, DlssApp, GameActivity, GameFilter, GameRow, GameSort, ReleaseDownload, SortKey,
-    StoreFilter, View,
+    Action, AppWindow, DlssApp, GameActivity, GameFilter, GameRow, GameSort, ReleaseDownload,
+    SortKey, StoreFilter,
 };
 use eframe::egui;
 
 const ROW_HEIGHT: f32 = 40.0;
 
-/// A click on a row checkbox, applied after the table is drawn.
-struct Toggle {
-    position: usize,
-    selected: bool,
-    extend: bool,
-}
-
-#[derive(Default)]
-struct TableRequests {
-    sort: Option<GameSort>,
-    review: Option<ReviewIntent>,
-    open: Option<dlss_core::GameId>,
-    toggle: Option<Toggle>,
-    select_all: Option<bool>,
-}
-
 impl DlssApp {
     pub(crate) fn library_view(&mut self, ui: &mut egui::Ui) {
-        self.render_release_setup(ui);
+        let ctx = ui.ctx().clone();
+        let actions = self.render_release_setup(ui);
+        self.apply_all(&ctx, actions);
         let rows = self.filtered_game_rows();
         if rows.is_empty() {
-            self.render_game_empty_state(ui);
+            let actions = self.render_game_empty_state(ui);
+            self.apply_all(&ctx, actions);
             return;
         }
-        let requests = self.render_game_rows(ui, &rows);
-        if let Some(sort) = requests.sort {
-            self.game_sort = sort;
-        }
-        if let Some(select) = requests.select_all {
-            self.set_selection(select, Some(&rows));
-        }
-        if let Some(toggle) = requests.toggle {
-            self.apply_toggle(&rows, &toggle);
-        }
-        if let Some(id) = requests.open {
-            self.view = View::Game(id);
-        }
-        if let Some(intent) = requests.review {
-            self.open_review(intent);
-        }
+        let actions = self.render_game_rows(ui, &rows);
+        self.apply_all(&ctx, actions);
     }
 
-    fn apply_toggle(&mut self, rows: &[usize], toggle: &Toggle) {
-        let range = if toggle.extend {
-            selection_range(
-                rows,
-                &self.games,
-                self.selection_anchor.as_ref(),
-                toggle.position,
-            )
+    /// The rows a click on a row checkbox changes: that row, or with Shift
+    /// the visible rows from the anchor game to it. As indices into
+    /// `self.games`, resolved against the rows this frame drew.
+    fn toggled_rows(&self, rows: &[usize], position: usize, extend: bool) -> Vec<usize> {
+        let range = if extend {
+            selection_range(rows, &self.games, self.selection_anchor.as_ref(), position)
         } else {
             None
         };
-        let range = range.unwrap_or(toggle.position..=toggle.position);
-        self.set_selection(toggle.selected, Some(&rows[range]));
-        self.selection_anchor = Some(self.games[rows[toggle.position]].id.clone());
+        rows[range.unwrap_or(position..=position)].to_vec()
     }
 
     /// Shown until an official release is downloaded, since nothing can be
     /// compared or updated before then. It keeps one place and one height
     /// through checking, downloading, and failing, so the table below does
     /// not jump as the state changes.
-    fn render_release_setup(&mut self, ui: &mut egui::Ui) {
+    fn render_release_setup(&self, ui: &mut egui::Ui) -> Vec<Action> {
+        let mut actions = Vec::new();
         let has_ready_release = self
             .releases
             .iter()
             .any(|release| release.state == dlss_core::ReleaseState::Ready);
         if has_ready_release {
-            return;
+            return actions;
         }
-        let latest = self.latest_release_meta().cloned();
-        let mut download = None;
-        let mut open_sources = false;
-        let mut retry = false;
+        let latest = self.latest_release_meta();
         widgets::card(ui, |ui| {
             ui.set_min_height(52.0);
             ui.horizontal(|ui| {
@@ -132,9 +99,11 @@ impl DlssApp {
                                 .add(widgets::primary_icon_button(icons::DOWNLOAD_SIMPLE, &label))
                                 .clicked()
                             {
-                                download = Some(release.metadata.id.clone());
+                                actions.push(Action::DownloadRelease(release.metadata.id.clone()));
                             }
-                            open_sources = ui.button("Other releases…").clicked();
+                            if ui.button("Other releases…").clicked() {
+                                actions.push(Action::OpenWindow(AppWindow::Releases));
+                            }
                             if let Some(error) = failed {
                                 widgets::status_text(
                                     ui,
@@ -152,9 +121,12 @@ impl DlssApp {
                             ui.spinner();
                         }
                         None => {
-                            retry = ui
+                            if ui
                                 .button(widgets::icon_text(icons::ARROW_CLOCKWISE, "Try again"))
-                                .clicked();
+                                .clicked()
+                            {
+                                actions.push(Action::RefreshCatalog);
+                            }
                             ui.label(
                                 egui::RichText::new("Could not reach GitHub").color(theme::DANGER),
                             )
@@ -169,15 +141,7 @@ impl DlssApp {
             });
         });
         ui.add_space(10.0);
-        if let Some(id) = download {
-            self.start_release_download(id);
-        }
-        if open_sources {
-            self.open_windows.insert(crate::AppWindow::Releases);
-        }
-        if retry {
-            let _ = self.worker.commands.send(Command::RefreshCatalog);
-        }
+        actions
     }
 
     /// The state, bytes received, and total size of the release download in
@@ -282,8 +246,8 @@ impl DlssApp {
             .collect()
     }
 
-    fn render_game_rows(&self, ui: &mut egui::Ui, rows: &[usize]) -> TableRequests {
-        let mut requests = TableRequests::default();
+    fn render_game_rows(&self, ui: &mut egui::Ui, rows: &[usize]) -> Vec<Action> {
+        let mut actions = Vec::new();
         let latest_ready = self.latest_release_ready();
         let latest_dlss = self.latest_dlss_version();
         let busy = self.busy();
@@ -317,7 +281,8 @@ impl DlssApp {
                     all_state,
                     selectable,
                     self.game_sort,
-                    &mut requests,
+                    rows,
+                    &mut actions,
                 );
             })
             .body(|body| {
@@ -329,10 +294,10 @@ impl DlssApp {
                         if game.dlls > 0 {
                             let mut selected = game.selected;
                             if widgets::checkbox(ui, &mut selected, "").clicked() {
-                                requests.toggle = Some(Toggle {
-                                    position,
+                                actions.push(Action::Select {
+                                    rows: self.toggled_rows(rows, position, click_with_shift(ui)),
                                     selected,
-                                    extend: click_with_shift(ui),
+                                    anchor: Some(game.id.clone()),
                                 });
                             }
                         }
@@ -353,17 +318,19 @@ impl DlssApp {
                         let activity = self.game_activity(&game.id);
                         let status = row_status(game, latest_ready);
                         if status_cell(ui, game, status, activity, can_update, busy) {
-                            requests.review = Some(ReviewIntent::QuickDlss(vec![game.id.clone()]));
+                            actions.push(Action::Review(ReviewIntent::QuickDlss(vec![
+                                game.id.clone(),
+                            ])));
                         }
                     });
                     let response = row.response();
                     if response.clicked() {
-                        requests.open = Some(game.id.clone());
+                        actions.push(Action::ShowGame(game.id.clone()));
                     }
                     response.on_hover_cursor(egui::CursorIcon::PointingHand);
                 });
             });
-        requests
+        actions
     }
 
     /// The newest DLSS Super Resolution build in the downloaded latest
@@ -380,13 +347,12 @@ impl DlssApp {
             .max()
     }
 
-    fn render_game_empty_state(&mut self, ui: &mut egui::Ui) {
+    fn render_game_empty_state(&self, ui: &mut egui::Ui) -> Vec<Action> {
         if self.games.is_empty() {
-            self.render_no_games(ui);
-            return;
+            return self.render_no_games(ui);
         }
         let (icon, title, detail, action) = self.empty_filter_message();
-        let mut act = false;
+        let mut actions = Vec::new();
         ui.vertical_centered(|ui| {
             ui.add_space(64.0);
             ui.label(widgets::icon(icon, 44.0, theme::TEXT_FAINT));
@@ -395,18 +361,12 @@ impl DlssApp {
             ui.label(egui::RichText::new(detail).color(theme::TEXT_MUTED));
             if let Some(action) = action {
                 ui.add_space(8.0);
-                act = ui.button(action).clicked();
+                if ui.button(action).clicked() {
+                    actions.push(Action::WidenFilter);
+                }
             }
         });
-        if act {
-            if !self.filter.is_empty() {
-                self.filter.clear();
-            } else if self.store_filter != StoreFilter::All {
-                self.store_filter = StoreFilter::All;
-            } else {
-                self.filter_mode = GameFilter::All;
-            }
-        }
+        actions
     }
 
     /// What an empty table says, and the button that widens it again.
@@ -474,9 +434,8 @@ impl DlssApp {
         }
     }
 
-    fn render_no_games(&mut self, ui: &mut egui::Ui) {
-        let mut add = false;
-        let mut open_folders = false;
+    fn render_no_games(&self, ui: &mut egui::Ui) -> Vec<Action> {
+        let mut actions = Vec::new();
         ui.vertical_centered(|ui| {
             ui.add_space(64.0);
             if self.runtime.scanning {
@@ -510,23 +469,24 @@ impl DlssApp {
                 // Center the two buttons under the text.
                 let width = 300.0;
                 ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
-                add = ui
+                if ui
                     .add(widgets::primary_icon_button(
                         icons::FOLDER_PLUS,
                         "Add game folder…",
                     ))
-                    .clicked();
-                open_folders = ui
+                    .clicked()
+                {
+                    actions.push(Action::AddFolder);
+                }
+                if ui
                     .button(widgets::icon_text(icons::FOLDER_SIMPLE, "Store details"))
-                    .clicked();
+                    .clicked()
+                {
+                    actions.push(Action::OpenWindow(AppWindow::Roots));
+                }
             });
         });
-        if add && let Some(root) = rfd::FileDialog::new().pick_folder() {
-            self.add_custom_root(&root);
-        }
-        if open_folders {
-            self.open_windows.insert(crate::AppWindow::Roots);
-        }
+        actions
     }
 }
 
@@ -556,14 +516,19 @@ fn header_row(
     all_state: TriState,
     selectable: usize,
     sort: GameSort,
-    requests: &mut TableRequests,
+    rows: &[usize],
+    actions: &mut Vec<Action>,
 ) {
     header.col(|ui| {
         widgets::table_header_background(ui);
         if selectable > 0
             && widgets::tri_checkbox(ui, all_state, "", "Select every game shown (Ctrl+A)")
         {
-            requests.select_all = Some(all_state != TriState::All);
+            actions.push(Action::Select {
+                rows: rows.to_vec(),
+                selected: all_state != TriState::All,
+                anchor: None,
+            });
         }
     });
     for (label, key) in [
@@ -574,7 +539,9 @@ fn header_row(
         ("Status", SortKey::Status),
     ] {
         header.col(|ui| {
-            requests.sort = table::sort_header(ui, label, key, sort).or(requests.sort);
+            if let Some(sort) = table::sort_header(ui, label, key, sort) {
+                actions.push(Action::Sort(sort));
+            }
         });
     }
 }

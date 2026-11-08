@@ -6,7 +6,7 @@ use super::theme::{self, icons};
 use super::toast::plural;
 use super::widgets::{self, TriState};
 use crate::ui::detail::dll_kind_icon;
-use crate::{Command, DlssApp};
+use crate::{Action, Command, DlssApp};
 use eframe::egui;
 
 pub(crate) enum ReviewIntent {
@@ -206,16 +206,15 @@ impl DlssApp {
             review.ready = ready;
         }
         let mut keep_open = true;
-        let mut clicked = FooterClick::None;
+        let mut action = None;
         // Until the latest release is downloaded there is nothing to apply,
         // so the footer's primary slot downloads it instead.
         let footer = Footer {
             ready: review.ready,
-            pending_download: self.latest_release_meta().map(|release| {
-                (
-                    release.metadata.tag.clone(),
-                    self.release_errors.contains_key(&release.metadata.id),
-                )
+            pending_download: self.latest_release_meta().map(|release| PendingDownload {
+                id: release.metadata.id.clone(),
+                tag: release.metadata.tag.clone(),
+                failed: self.release_errors.contains_key(&release.metadata.id),
             }),
             downloading: self.release_download.is_some(),
             busy: self.busy(),
@@ -248,24 +247,15 @@ impl DlssApp {
             },
             // Pinned below the scrolling list: with many staged changes the
             // list is what scrolls, never the button that applies them.
-            |ui| clicked = footer.show(ui, checked.get()),
+            |ui| action = footer.show(ui, checked.get()),
         );
-        let cancel = clicked == FooterClick::Cancel;
-        let download = clicked == FooterClick::Download;
-        let apply = clicked == FooterClick::Apply;
-        if cancel {
-            keep_open = false;
-        }
-        if download && let Some(release) = self.latest_release_meta() {
-            let id = release.metadata.id.clone();
-            self.start_release_download(id);
-        }
-        if apply {
-            self.apply_review(&review);
-            keep_open = false;
-        }
-        if keep_open {
+        // Applying takes the review back out and closes it, even when Esc
+        // dismissed the dialog in the same frame.
+        if keep_open || matches!(action, Some(Action::ApplyReview)) {
             self.review = Some(review);
+        }
+        if let Some(action) = action {
+            self.apply(ctx, action);
         }
     }
 
@@ -302,7 +292,7 @@ impl DlssApp {
 
     /// Converts the checked rows into one pinned profile per game and hands
     /// them to the worker, which re-plans and re-validates everything.
-    fn apply_review(&mut self, review: &ReviewState) {
+    pub(crate) fn apply_review(&mut self, review: &ReviewState) {
         // One run at a time: a second batch would overwrite the counts of
         // the first and its summary would be wrong.
         if self.busy() {
@@ -476,26 +466,26 @@ fn review_row_list(ui: &mut egui::Ui, review: &mut ReviewState) {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum FooterClick {
-    None,
-    Apply,
-    Download,
-    Cancel,
+/// The latest official release, which the review downloads before it can
+/// list any change.
+struct PendingDownload {
+    id: dlss_core::ReleaseId,
+    tag: String,
+    /// The last download of it failed.
+    failed: bool,
 }
 
 /// What the review footer needs to know to pick its buttons.
 struct Footer {
     ready: bool,
-    /// The latest release's tag, and whether its last download failed.
-    pending_download: Option<(String, bool)>,
+    pending_download: Option<PendingDownload>,
     downloading: bool,
     busy: bool,
 }
 
 impl Footer {
-    fn show(&self, ui: &mut egui::Ui, checked: usize) -> FooterClick {
-        let mut clicked = FooterClick::None;
+    fn show(&self, ui: &mut egui::Ui, checked: usize) -> Option<Action> {
+        let mut action = None;
         ui.add_space(8.0);
         ui.separator();
         ui.label(
@@ -508,23 +498,17 @@ impl Footer {
         );
         ui.add_space(6.0);
         widgets::button_row(ui, |ui| {
-            let primary = if self.ready {
+            action = if self.ready {
                 self.apply_button(ui, checked)
+                    .then_some(Action::ApplyReview)
             } else {
                 self.download_button(ui)
             };
-            if primary {
-                clicked = if self.ready {
-                    FooterClick::Apply
-                } else {
-                    FooterClick::Download
-                };
-            }
             if ui.button("Cancel").clicked() {
-                clicked = FooterClick::Cancel;
+                action = Some(Action::CloseReview);
             }
         });
-        clicked
+        action
     }
 
     fn apply_button(&self, ui: &mut egui::Ui, checked: usize) -> bool {
@@ -542,14 +526,12 @@ impl Footer {
         .clicked()
     }
 
-    fn download_button(&self, ui: &mut egui::Ui) -> bool {
-        let Some((tag, failed)) = &self.pending_download else {
-            return false;
-        };
-        let label = if *failed {
+    fn download_button(&self, ui: &mut egui::Ui) -> Option<Action> {
+        let release = self.pending_download.as_ref()?;
+        let label = if release.failed {
             "Try again".to_owned()
         } else {
-            format!("Download {tag}")
+            format!("Download {}", release.tag)
         };
         ui.add_enabled(
             !self.downloading,
@@ -557,6 +539,7 @@ impl Footer {
         )
         .on_disabled_hover_text("Downloading…")
         .clicked()
+        .then(|| Action::DownloadRelease(release.id.clone()))
     }
 }
 

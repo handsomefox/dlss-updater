@@ -168,8 +168,7 @@ impl DlssApp {
             ))
             .clicked()
         {
-            let games = std::mem::take(&mut self.last_change);
-            self.start_undo(games);
+            self.undo_last_change();
         }
     }
 

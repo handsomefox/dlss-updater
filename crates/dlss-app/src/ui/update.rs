@@ -4,16 +4,9 @@
 
 use super::theme::{self, icons};
 use super::widgets;
-use crate::{APP_INFO, AppWindow, DlssApp};
+use crate::{APP_INFO, Action, AppWindow, DlssApp};
 use app_update::{CheckPeriod, NoteBlock, Settings, Updater};
 use eframe::egui;
-
-enum UpdateAction {
-    Download,
-    Restart,
-    Skip,
-    Later,
-}
 
 impl DlssApp {
     /// A chip beside the window buttons while a new version is out, the way
@@ -43,7 +36,7 @@ impl DlssApp {
     pub(crate) fn update_window(&mut self, ctx: &egui::Context) {
         let mut open = true;
         let mut period = self.persisted.app_updates.period;
-        let mut check = false;
+        let mut actions = Vec::new();
         let mut action = None;
         let busy = self.busy();
         let updater = &self.updater;
@@ -52,31 +45,14 @@ impl DlssApp {
             ctx,
             widgets::dialog("app-update", icons::ARROW_CIRCLE_UP, "App updates", 560.0),
             &mut open,
-            |ui| update_body(ui, updater, settings, &mut period, &mut check),
+            |ui| update_body(ui, updater, settings, &mut period, &mut actions),
             |ui| action = update_actions(ui, updater, busy),
         );
         self.persisted.app_updates.period = period;
-        if check {
-            self.updater.check_now();
-        }
-        match action {
-            Some(UpdateAction::Download) => self.updater.download(),
-            Some(UpdateAction::Restart) => {
-                if self.updater.install_and_restart().is_ok() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            }
-            Some(UpdateAction::Skip) => {
-                self.updater.skip(&mut self.persisted.app_updates);
-                open = false;
-            }
-            Some(UpdateAction::Later) => {
-                self.updater.dismiss();
-                open = false;
-            }
-            None => {}
-        }
+        actions.extend(action);
+        // Before the actions, because Skip and Not now close the dialog.
         self.set_window_open(AppWindow::Update, open);
+        self.apply_all(ctx, actions);
     }
 }
 
@@ -89,7 +65,7 @@ fn update_body(
     updater: &Updater,
     settings: &Settings,
     period: &mut CheckPeriod,
-    check: &mut bool,
+    actions: &mut Vec<Action>,
 ) {
     let current = updater.current().map_or_else(
         || APP_INFO.version.to_owned(),
@@ -131,12 +107,15 @@ fn update_body(
                     ui.selectable_value(period, option, option.label());
                 }
             });
-        *check = ui
+        if ui
             .add_enabled(
                 !updater.is_busy(),
                 egui::Button::new(widgets::icon_text(icons::ARROW_CLOCKWISE, "Check now")),
             )
-            .clicked();
+            .clicked()
+        {
+            actions.push(Action::CheckAppUpdate);
+        }
     });
     let last = settings.last_check.map_or_else(
         || "Never checked".to_owned(),
@@ -248,7 +227,7 @@ fn release_notes(ui: &mut egui::Ui, markdown: &str) {
     }
 }
 
-fn update_actions(ui: &mut egui::Ui, updater: &Updater, busy: bool) -> Option<UpdateAction> {
+fn update_actions(ui: &mut egui::Ui, updater: &Updater, busy: bool) -> Option<Action> {
     let update = updater.update()?;
     ui.add_space(8.0);
     if let Some((received, total)) = updater.progress() {
@@ -275,7 +254,7 @@ fn update_actions(ui: &mut egui::Ui, updater: &Updater, busy: bool) -> Option<Up
                 .on_disabled_hover_text("Wait for the DLL changes in progress to finish")
                 .clicked()
             {
-                action = Some(UpdateAction::Restart);
+                action = Some(Action::RestartForAppUpdate);
             }
         } else if updater.can_install()
             && ui
@@ -288,21 +267,21 @@ fn update_actions(ui: &mut egui::Ui, updater: &Updater, busy: bool) -> Option<Up
                 )
                 .clicked()
         {
-            action = Some(UpdateAction::Download);
+            action = Some(Action::DownloadAppUpdate);
         }
         if ui
             .button("Skip this version")
             .on_hover_text("Stop pointing out this version. A newer one shows up again.")
             .clicked()
         {
-            action = Some(UpdateAction::Skip);
+            action = Some(Action::SkipAppUpdate);
         }
         if ui
             .button("Not now")
             .on_hover_text("Hide the reminder until DLSS Updater starts again")
             .clicked()
         {
-            action = Some(UpdateAction::Later);
+            action = Some(Action::DismissAppUpdate);
         }
         action
     })
