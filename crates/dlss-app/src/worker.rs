@@ -451,11 +451,18 @@ fn undo_command(id: GameId, events: &EventSink, state: &mut WorkerState) {
     let Some(game) = begin_game_operation(&id, events, state) else {
         return;
     };
-    let result = state
-        .undo_plans
-        .remove(&id)
-        .ok_or_else(|| WorkerError::State("the immediate undo plan is no longer available".into()))
-        .and_then(|plan| undo_game(&game, &plan));
+    let Some(plan) = state.undo_plans.remove(&id) else {
+        let error = WorkerError::State("the immediate undo plan is no longer available".into());
+        finish_game_operation(id, game, Err(error), events, state);
+        return;
+    };
+    // A report carries the swaps that still failed as its undo plan, which
+    // `finish_game_operation` keeps for another try. An error before any swap
+    // ran keeps the whole plan.
+    let result = undo_game(&game, &plan);
+    if result.is_err() {
+        state.undo_plans.insert(id.clone(), plan);
+    }
     finish_game_operation(id, game, result, events, state);
 }
 
@@ -1063,39 +1070,7 @@ fn execute_game_plan(
             "planned DLL swap"
         );
     }
-    let inspector = dlss_platform::windows::WindowsDllInspector;
-    let backups = dlss_core::BackupStore::new(base.join("backups"));
-    let mut result = dlss_core::execute_plan(
-        plan,
-        &inspector,
-        &dlss_platform::windows::WindowsAtomicFileReplacer,
-        &backups,
-        now_unix(),
-    );
-    let denied: Vec<_> = plan
-        .swaps
-        .iter()
-        .zip(&result.swaps)
-        .filter(|(_, outcome)| outcome.denied)
-        .map(|(swap, _)| swap.clone())
-        .collect();
-    let mut warning = None;
-    if !denied.is_empty() {
-        match elevate_failed(game, base, denied) {
-            Ok(elevated) => {
-                for elevated_swap in elevated.swaps {
-                    if let Some(existing) = result
-                        .swaps
-                        .iter_mut()
-                        .find(|swap| swap.installation == elevated_swap.installation)
-                    {
-                        *existing = elevated_swap;
-                    }
-                }
-            }
-            Err(error) => warning = Some(error.to_string()),
-        }
-    }
+    let (result, warning) = execute_with_elevation(game, base, plan);
     let changed = result
         .swaps
         .iter()
@@ -1135,6 +1110,49 @@ fn execute_game_plan(
             swaps: undo_swaps,
         }),
     }
+}
+
+/// Runs `plan`, then retries through the elevated helper every swap Windows
+/// denied. Returns the combined outcome and the helper's error, if it could
+/// not run.
+#[cfg(windows)]
+fn execute_with_elevation(
+    game: &GameInstall,
+    base: &std::path::Path,
+    plan: &dlss_core::OperationPlan,
+) -> (dlss_core::BatchResult, Option<String>) {
+    let mut result = dlss_core::execute_plan(
+        plan,
+        &dlss_platform::windows::WindowsDllInspector,
+        &dlss_platform::windows::WindowsAtomicFileReplacer,
+        &dlss_core::BackupStore::new(base.join("backups")),
+        now_unix(),
+    );
+    let denied: Vec<_> = plan
+        .swaps
+        .iter()
+        .zip(&result.swaps)
+        .filter(|(_, outcome)| outcome.denied)
+        .map(|(swap, _)| swap.clone())
+        .collect();
+    let mut warning = None;
+    if !denied.is_empty() {
+        match elevate_failed(game, base, denied) {
+            Ok(elevated) => {
+                for elevated_swap in elevated.swaps {
+                    if let Some(existing) = result
+                        .swaps
+                        .iter_mut()
+                        .find(|swap| swap.installation == elevated_swap.installation)
+                    {
+                        *existing = elevated_swap;
+                    }
+                }
+            }
+            Err(error) => warning = Some(error.to_string()),
+        }
+    }
+    (result, warning)
 }
 
 #[cfg(windows)]
@@ -1220,27 +1238,28 @@ fn change_indicator(request: IndicatorRequest) -> WorkerResult<dlss_core::ToolCh
 }
 
 #[cfg(windows)]
-fn undo_game(_game: &GameInstall, plan: &dlss_core::OperationPlan) -> WorkerResult<UpgradeReport> {
+fn undo_game(game: &GameInstall, plan: &dlss_core::OperationPlan) -> WorkerResult<UpgradeReport> {
     let base = data_root()?;
-    let result = dlss_core::execute_plan(
-        plan,
-        &dlss_platform::windows::WindowsDllInspector,
-        &dlss_platform::windows::WindowsAtomicFileReplacer,
-        &dlss_core::BackupStore::new(base.join("backups")),
-        now_unix(),
-    );
-    let changed = result
+    // An update that needed the helper needs it to undo as well.
+    let (result, warning) = execute_with_elevation(game, &base, plan);
+    let remaining: Vec<_> = plan
         .swaps
         .iter()
-        .filter(|swap| swap.result.is_ok())
-        .count();
+        .zip(&result.swaps)
+        .filter(|(_, outcome)| outcome.result.is_err())
+        .map(|(swap, _)| swap.clone())
+        .collect();
+    let failed = remaining.len();
     Ok(UpgradeReport {
-        changed,
-        failed: result.swaps.len() - changed,
+        changed: result.swaps.len() - failed,
+        failed,
         release: "Undo".into(),
-        can_undo: false,
-        warning: None,
-        undo_plan: None,
+        can_undo: failed > 0,
+        warning,
+        undo_plan: (failed > 0).then(|| dlss_core::OperationPlan {
+            nonce: operation_nonce(),
+            swaps: remaining,
+        }),
     })
 }
 
