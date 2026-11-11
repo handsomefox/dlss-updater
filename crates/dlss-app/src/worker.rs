@@ -392,7 +392,13 @@ fn profile_command(
         .targets
         .values()
         .filter_map(|desired| match desired {
-            dlss_core::DesiredDll::Cached { release, .. } => Some(release.clone()),
+            // Imported DLLs come from the validated import catalog above, not
+            // from an official release.
+            dlss_core::DesiredDll::Cached { release, .. }
+                if !dlss_core::is_imported_release(release) =>
+            {
+                Some(release.clone())
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
