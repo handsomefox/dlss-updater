@@ -45,7 +45,7 @@ This project is not affiliated with or endorsed by NVIDIA. DLSS, NVIDIA, and Str
 
 Download the latest release from the [releases page](https://github.com/handsomefox/dlss-updater/releases). Unpack `dlss-updater-<version>-windows-x86_64.zip` and run `dlss-updater.exe` from the folder inside it. `SHA256SUMS` beside the archive holds its checksum.
 
-The app runs on Windows 10 and 11, x86-64.
+The app runs on Windows 10 and 11, x86-64. It needs the Microsoft Visual C++ Redistributable for x64, which most Windows installations already have. If Windows reports that `VCRUNTIME140.dll` was not found, install the [latest supported redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist).
 
 ## Updates
 
