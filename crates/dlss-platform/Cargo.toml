@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 app-folders.workspace = true
-dlss-core = { version = "=1.4.8", path = "../dlss-core" }
+dlss-core = { version = "=1.4.9", path = "../dlss-core" }
 object.workspace = true
 serde.workspace = true
 serde_json.workspace = true

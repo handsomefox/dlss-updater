@@ -19,9 +19,9 @@ app-folders.workspace = true
 app-update.workspace = true
 app-update-ui.workspace = true
 crossbeam-channel.workspace = true
-dlss-catalog = { version = "=1.4.8", path = "../dlss-catalog" }
-dlss-core = { version = "=1.4.8", path = "../dlss-core" }
-dlss-platform = { version = "=1.4.8", path = "../dlss-platform" }
+dlss-catalog = { version = "=1.4.9", path = "../dlss-catalog" }
+dlss-core = { version = "=1.4.9", path = "../dlss-core" }
+dlss-platform = { version = "=1.4.9", path = "../dlss-platform" }
 eframe.workspace = true
 egui_extras.workspace = true
 jiff.workspace = true

@@ -2,6 +2,23 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.4.9
+
+- Apply an imported DLL. Selecting one always failed with "selected official release is
+  unavailable".
+- Restore a backup, an imported DLL, or an older cached release without downloading the newest
+  official release first. A newly published release blocked those while offline.
+- **Undo** asks for administrator rights when the update it reverses needed them, and keeps the
+  DLLs it could not put back so you can try again. It failed with access denied.
+- List the backups that a change made with administrator rights created. They were missing from
+  **Restore**.
+- Fail a DLL swap when a launcher rewrites the DLL while the swap runs, instead of overwriting the
+  launcher's file.
+- Remove the copies staged for administrator rights when a later DLL in the same change fails its
+  checks.
+- Opening a second copy of the app while the first has an update waiting no longer deletes the
+  first copy's download.
+
 ## 1.4.8
 
 - Stop waiting forever on a download, update, or undo started after the background worker had
