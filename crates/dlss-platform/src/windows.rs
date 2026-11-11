@@ -1078,8 +1078,16 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
     let backups = backups.canonicalize().ok();
     let imports = base.join("imports/objects");
     let imports = imports.canonicalize().ok();
-    let mut staged_sources = Vec::with_capacity(plan.operation.swaps.len());
-    let mut swaps = Vec::with_capacity(plan.operation.swaps.len());
+    // Owns every staged copy from the moment it exists: an item that fails
+    // validation further down returns early, and dropping this removes the
+    // copies staged for the items before it.
+    let mut staged_plan = StagedFilePlan {
+        operation: OperationPlan {
+            nonce: plan.operation.nonce.clone(),
+            swaps: Vec::with_capacity(plan.operation.swaps.len()),
+        },
+        sources: Vec::with_capacity(plan.operation.swaps.len()),
+    };
     for (index, swap) in plan.operation.swaps.iter().enumerate() {
         if swap.game != plan.game_id {
             return Err(CoreError::Validation("file plan game ID mismatch".into()));
@@ -1137,19 +1145,13 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
             index,
             policy,
         )?;
-        staged_sources.push(staged.clone());
+        staged_plan.sources.push(staged.clone());
         let mut staged_swap: PlannedSwap = swap.clone();
         staged_swap.target_path = target;
         staged_swap.source_path = staged;
-        swaps.push(staged_swap);
+        staged_plan.operation.swaps.push(staged_swap);
     }
-    Ok(StagedFilePlan {
-        operation: OperationPlan {
-            nonce: plan.operation.nonce.clone(),
-            swaps,
-        },
-        sources: staged_sources,
-    })
+    Ok(staged_plan)
 }
 
 fn staged_source_policy(release_source: bool, backup_source: bool) -> TrustPolicy {
