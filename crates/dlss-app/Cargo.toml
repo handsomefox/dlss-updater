@@ -35,7 +35,7 @@ embed-resource = "=3.0.12"
 
 [dev-dependencies]
 serde_json.workspace = true
-tempfile = "=3.27.0"
+tempfile.workspace = true
 
 # Referenced by build.rs; cargo-machete does not inspect build-script source.
 [package.metadata.cargo-machete]
