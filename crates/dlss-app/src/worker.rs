@@ -437,12 +437,30 @@ fn profile_command(
             }
         }
     }
-    let asset = latest_asset(&state.assets)
-        .cloned()
-        .ok_or_else(|| WorkerError::State("official release metadata is not available".into()));
+    // Restores, imports, and older cached releases need nothing from the
+    // latest release, so a newer release that cannot be downloaded right now
+    // does not block them.
+    let wants_latest = profile
+        .targets
+        .values()
+        .any(|desired| matches!(desired, dlss_core::DesiredDll::LatestOfficial));
+    let asset = if wants_latest {
+        latest_asset(&state.assets)
+            .cloned()
+            .map(Some)
+            .ok_or_else(|| WorkerError::State("official release metadata is not available".into()))
+    } else {
+        Ok(None)
+    };
     let result = asset.and_then(|asset| {
-        let progress = release_progress(events, asset.release.id.clone());
-        apply_profile(&game, &asset, &cached, profile, state, progress)
+        let progress = release_progress(
+            events,
+            asset.as_ref().map_or_else(
+                || ReleaseId(String::new()),
+                |asset| asset.release.id.clone(),
+            ),
+        );
+        apply_profile(&game, asset.as_ref(), &cached, profile, state, progress)
     });
     finish_game_operation(id, game, result, events, state);
 }
@@ -887,13 +905,20 @@ fn inspect_release(
 #[cfg(windows)]
 fn apply_profile(
     game: &GameInstall,
-    asset: &OfficialAsset,
+    asset: Option<&OfficialAsset>,
     cached: &[dlss_core::CatalogDll],
     profile: &TargetProfile,
     state: &mut WorkerState,
     progress: impl FnMut(dlss_core::ReleaseState, u64, Option<u64>),
 ) -> WorkerResult<UpgradeReport> {
-    let (base, catalog_dlls) = prepare_release(asset, state, Revalidate::ReuseSession, progress)?;
+    let (base, latest) = match asset {
+        Some(asset) => {
+            let (base, release) =
+                prepare_release(asset, state, Revalidate::ReuseSession, progress)?;
+            (base, release.dlls)
+        }
+        None => (data_root()?, Vec::new()),
+    };
     let backup_report = dlss_core::BackupStore::new(base.join("backups"))
         .load_trusted_report(
             &dlss_platform::windows::WindowsDllInspector,
@@ -906,13 +931,19 @@ fn apply_profile(
     let plan = dlss_core::plan_target_profile(
         operation_nonce(),
         &game.dlls,
-        &catalog_dlls.dlls,
+        &latest,
         cached,
         &backup_report.usable,
         profile,
     )?;
-    Ok(execute_game_plan(game, asset, &base, &plan))
+    let source = asset.map_or(SELECTED_VERSIONS, |asset| asset.release.tag.as_str());
+    Ok(execute_game_plan(game, source, &base, &plan))
 }
+
+/// How a report names its source when no single official release supplied
+/// the DLLs: restores, imports, and older cached releases.
+#[cfg(windows)]
+const SELECTED_VERSIONS: &str = "the selected versions";
 
 #[cfg(windows)]
 fn prepare_release(
@@ -1043,16 +1074,16 @@ fn validate_release_cache(
 #[cfg(windows)]
 fn execute_game_plan(
     game: &GameInstall,
-    asset: &OfficialAsset,
+    source: &str,
     base: &std::path::Path,
     plan: &dlss_core::OperationPlan,
 ) -> UpgradeReport {
     if plan.swaps.is_empty() {
-        tracing::warn!(game = %game.name, release = %asset.release.tag, "profile resolved to an empty swap plan");
+        tracing::warn!(game = %game.name, source, "profile resolved to an empty swap plan");
         return UpgradeReport {
             changed: 0,
             failed: 0,
-            release: asset.release.tag.clone(),
+            release: source.to_owned(),
             can_undo: false,
             warning: Some("No DLL changes were planned. The selected versions already match the installed files, or no DLL target was selected.".into()),
             undo_plan: None,
@@ -1102,7 +1133,7 @@ fn execute_game_plan(
     UpgradeReport {
         changed,
         failed: result.swaps.len() - changed,
-        release: asset.release.tag.clone(),
+        release: source.to_owned(),
         can_undo,
         warning,
         undo_plan: can_undo.then(|| dlss_core::OperationPlan {
@@ -1266,7 +1297,7 @@ fn undo_game(game: &GameInstall, plan: &dlss_core::OperationPlan) -> WorkerResul
 #[cfg(not(windows))]
 fn apply_profile(
     _game: &GameInstall,
-    _asset: &OfficialAsset,
+    _asset: Option<&OfficialAsset>,
     _cached: &[dlss_core::CatalogDll],
     _profile: &TargetProfile,
     _state: &mut WorkerState,
