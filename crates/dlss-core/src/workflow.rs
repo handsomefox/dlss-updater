@@ -420,13 +420,21 @@ fn execute_swap(
         inspector,
         timestamp_unix,
     )?;
-    replacer.replace(&swap.target_path, &swap.source_path, swap.source_sha256)?;
+    replacer.replace(
+        &swap.target_path,
+        swap.expected_sha256,
+        &swap.source_path,
+        swap.source_sha256,
+    )?;
     let installed = inspector.inspect_structure(&swap.target_path)?;
     if installed.sha256 != swap.source_sha256 {
         let verification = CoreError::Validation("replacement verification hash mismatch".into());
-        if let Err(rollback) =
-            replacer.replace(&swap.target_path, &backup.content_path, backup.sha256)
-        {
+        if let Err(rollback) = replacer.replace(
+            &swap.target_path,
+            installed.sha256,
+            &backup.content_path,
+            backup.sha256,
+        ) {
             return Err(CoreError::Validation(format!(
                 "{verification}; backup rollback failed: {rollback}"
             )));
@@ -655,14 +663,38 @@ mod tests {
         fn replace(
             &self,
             target: &Path,
+            expected_target_hash: [u8; 32],
             source: &Path,
             _expected_source_hash: [u8; 32],
         ) -> Result<(), CoreError> {
             if self.fail.lock().unwrap().iter().any(|path| path == target) {
                 return Err(CoreError::Validation("injected replacement failure".into()));
             }
+            if hash_file(target)? != expected_target_hash {
+                return Err(CoreError::StalePlan);
+            }
             fs::copy(source, target)?;
             Ok(())
+        }
+    }
+
+    /// Rewrites the target just before handing over to [`CopyReplacer`], the
+    /// way a launcher repairing its files would between backup and swap.
+    struct RacingReplacer {
+        inner: CopyReplacer,
+        bytes: &'static [u8],
+    }
+    impl AtomicFileReplacer for RacingReplacer {
+        fn replace(
+            &self,
+            target: &Path,
+            expected_target_hash: [u8; 32],
+            source: &Path,
+            expected_source_hash: [u8; 32],
+        ) -> Result<(), CoreError> {
+            fs::write(target, self.bytes)?;
+            self.inner
+                .replace(target, expected_target_hash, source, expected_source_hash)
         }
     }
 
@@ -671,6 +703,7 @@ mod tests {
         fn replace(
             &self,
             _target: &Path,
+            _expected_target_hash: [u8; 32],
             _source: &Path,
             _expected_source_hash: [u8; 32],
         ) -> Result<(), CoreError> {
@@ -1122,6 +1155,47 @@ mod tests {
                 .contains("stale")
         );
         assert!(!dir.path().join("backups/objects").exists());
+    }
+
+    #[test]
+    fn a_target_rewritten_after_the_backup_is_not_overwritten() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target.dll");
+        let source = dir.path().join("source.dll");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&source, b"new").unwrap();
+        let plan = OperationPlan {
+            nonce: "n".into(),
+            swaps: vec![PlannedSwap {
+                game: GameId("g".into()),
+                installation: DllInstallationId("d".into()),
+                target_path: target.clone(),
+                expected_sha256: hash_file(&target).unwrap(),
+                source_path: source.clone(),
+                source_sha256: hash_file(&source).unwrap(),
+                comparison: Comparison::Upgrade,
+            }],
+        };
+        let result = execute_plan(
+            &plan,
+            &BytesInspector,
+            &RacingReplacer {
+                inner: CopyReplacer {
+                    fail: Mutex::new(Vec::new()),
+                },
+                bytes: b"launcher repair",
+            },
+            &BackupStore::new(dir.path().join("backups")),
+            0,
+        );
+        assert!(
+            result.swaps[0]
+                .result
+                .as_ref()
+                .unwrap_err()
+                .contains("stale")
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"launcher repair");
     }
 
     #[test]

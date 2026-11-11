@@ -655,6 +655,7 @@ impl AtomicFileReplacer for WindowsAtomicFileReplacer {
     fn replace(
         &self,
         target: &Path,
+        expected_target_hash: [u8; 32],
         source: &Path,
         expected_source_hash: [u8; 32],
     ) -> Result<(), CoreError> {
@@ -679,6 +680,12 @@ impl AtomicFileReplacer for WindowsAtomicFileReplacer {
             output.sync_all()?;
             if hash_file(&stage)? != expected_source_hash {
                 return Err(CoreError::Validation("staged source hash mismatch".into()));
+            }
+            // The backup was taken against this hash. Re-read the target as
+            // late as possible, so a launcher that rewrote it while the source
+            // was being staged fails the swap instead of losing its bytes.
+            if hash_file(target)? != expected_target_hash {
+                return Err(CoreError::StalePlan);
             }
             let target_wide = wide(target);
             let stage_wide = wide(&stage);
@@ -1213,6 +1220,38 @@ fn stage_elevated_source(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sha(bytes: &[u8]) -> [u8; 32] {
+        Sha256::digest(bytes).into()
+    }
+
+    #[test]
+    fn replacer_swaps_a_target_that_still_matches_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nvngx_dlss.dll");
+        let source = dir.path().join("source.dll");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&source, b"new").unwrap();
+        WindowsAtomicFileReplacer
+            .replace(&target, sha(b"old"), &source, sha(b"new"))
+            .unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        // Nothing staged is left beside the target.
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn replacer_refuses_a_target_that_changed_since_the_plan() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("nvngx_dlss.dll");
+        let source = dir.path().join("source.dll");
+        fs::write(&target, b"rewritten by a launcher").unwrap();
+        fs::write(&source, b"new").unwrap();
+        let result = WindowsAtomicFileReplacer.replace(&target, sha(b"old"), &source, sha(b"new"));
+        assert!(matches!(result, Err(CoreError::StalePlan)));
+        assert_eq!(fs::read(&target).unwrap(), b"rewritten by a launcher");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
 
     fn native(status: i32, signer: Option<&str>) -> NativeTrustResult {
         NativeTrustResult {

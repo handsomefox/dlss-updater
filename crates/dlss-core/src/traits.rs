@@ -95,13 +95,19 @@ pub trait KnownDirectories: Send + Sync {
     fn program_data(&self) -> Result<PathBuf, CoreError>;
 }
 pub trait AtomicFileReplacer: Send + Sync {
-    /// Replaces `target` with the hash-checked `source`.
+    /// Replaces `target` with the hash-checked `source`, provided `target`
+    /// still hashes to `expected_target_hash` immediately before the swap.
+    ///
+    /// The plan and the backup were made against that hash. A launcher that
+    /// rewrites the DLL in between must make the swap fail with
+    /// [`CoreError::StalePlan`] rather than be overwritten.
     ///
     /// # Errors
     /// Returns an error when validation or replacement fails.
     fn replace(
         &self,
         target: &Path,
+        expected_target_hash: [u8; 32],
         source: &Path,
         expected_source_hash: [u8; 32],
     ) -> Result<(), CoreError>;
