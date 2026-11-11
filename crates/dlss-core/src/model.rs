@@ -158,6 +158,18 @@ pub fn display_path(path: &Path) -> String {
     }
 }
 
+/// Whether two paths name the same file the way Windows compares them: with
+/// or without the `\\?\` prefix a canonicalized path carries, and without
+/// regard to ASCII case.
+///
+/// The elevated helper canonicalizes the targets it swaps, so the backups it
+/// records name `\\?\C:\...` while discovery reports `C:\...`. Comparing
+/// those exactly would hide every elevated backup from restore.
+#[must_use]
+pub fn same_path(left: &Path, right: &Path) -> bool {
+    display_path(left).eq_ignore_ascii_case(&display_path(right))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GameInstall {
     pub id: GameId,
@@ -473,6 +485,28 @@ mod tests {
         assert_eq!(shown(r"\\?\Volume{0b1c}\Games"), r"\\?\Volume{0b1c}\Games");
         assert_eq!(shown(r"D:\Games"), r"D:\Games");
         assert_eq!(shown("/home/demo/Games"), "/home/demo/Games");
+    }
+
+    #[test]
+    fn same_path_matches_a_canonical_path_to_its_plain_form() {
+        let same = |left: &str, right: &str| same_path(Path::new(left), Path::new(right));
+        assert!(same(
+            r"\\?\C:\Games\Cyberpunk\nvngx_dlss.dll",
+            r"C:\Games\Cyberpunk\nvngx_dlss.dll"
+        ));
+        assert!(same(
+            r"\\?\c:\games\CYBERPUNK\nvngx_dlss.dll",
+            r"C:\Games\Cyberpunk\nvngx_dlss.dll"
+        ));
+        assert!(same(r"\\?\UNC\nas\games\x.dll", r"\\nas\games\x.dll"));
+        assert!(!same(
+            r"\\?\C:\Games\A\nvngx_dlss.dll",
+            r"C:\Games\B\nvngx_dlss.dll"
+        ));
+        assert!(!same(
+            r"C:\Games\nvngx_dlss.dll",
+            r"D:\Games\nvngx_dlss.dll"
+        ));
     }
 
     fn meta(v: Option<DllVersion>, hash: u8) -> DllMetadata {

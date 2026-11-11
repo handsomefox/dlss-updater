@@ -361,7 +361,7 @@ impl DlssApp {
         let restore_options: Vec<_> = self
             .backups
             .iter()
-            .filter(|backup| backup.original_path == dll.path)
+            .filter(|backup| dlss_core::same_path(&backup.original_path, &dll.path))
             .map(|backup| {
                 (
                     dlss_core::DesiredDll::Restore {

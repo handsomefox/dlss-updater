@@ -141,7 +141,8 @@ pub fn plan_target_profile(
             DesiredDll::Restore { backup_sha256 } => backups
                 .iter()
                 .find(|backup| {
-                    backup.sha256 == *backup_sha256 && backup.original_path == current.path
+                    backup.sha256 == *backup_sha256
+                        && crate::same_path(&backup.original_path, &current.path)
                 })
                 .map(|backup| (backup.content_path.clone(), backup.sha256, backup.version)),
         }
@@ -257,7 +258,8 @@ impl BackupStore {
         // restore, so an entry that later goes bad is still never usable.
         let mut index = self.load_index()?;
         if let Some(existing) = index.records.iter_mut().find(|existing| {
-            existing.sha256 == record.sha256 && existing.original_path == record.original_path
+            existing.sha256 == record.sha256
+                && crate::same_path(&existing.original_path, &record.original_path)
         }) {
             *existing = record.clone();
         } else {
@@ -921,6 +923,43 @@ mod tests {
         let plan = plan_target_profile("n", &[installed], &[], &[], &[backup], &profile).unwrap();
         assert_eq!(plan.swaps.len(), 1);
         assert_eq!(plan.swaps[0].comparison, Comparison::Downgrade);
+    }
+
+    #[test]
+    fn restore_finds_a_backup_the_elevated_helper_recorded() {
+        // The helper canonicalizes its targets, so its backups name the
+        // verbatim form of the path discovery reports.
+        let path = PathBuf::from(r"C:\Games\Control\nvngx_dlss.dll");
+        let installed = DllInstallation {
+            id: DllInstallationId(path.display().to_string()),
+            game_id: GameId("g".into()),
+            file_name: "nvngx_dlss.dll".into(),
+            metadata: DllMetadata {
+                version: Some(DllVersion::new(310, 9, 16, 0)),
+                sha256: [1; 32],
+                signature: SignatureStatus::Trusted,
+                x86_64: true,
+            },
+            path,
+        };
+        let backup = BackupRecord {
+            sha256: [7; 32],
+            content_path: PathBuf::from("backup.bin"),
+            original_path: PathBuf::from(r"\\?\C:\Games\control\NVNGX_DLSS.dll"),
+            version: Some(DllVersion::new(3, 7, 10, 0)),
+            created_unix: 1,
+        };
+        let profile = TargetProfile {
+            targets: [(
+                installed.id.clone(),
+                DesiredDll::Restore {
+                    backup_sha256: backup.sha256,
+                },
+            )]
+            .into(),
+        };
+        let plan = plan_target_profile("n", &[installed], &[], &[], &[backup], &profile).unwrap();
+        assert_eq!(plan.swaps.len(), 1);
     }
 
     #[test]
