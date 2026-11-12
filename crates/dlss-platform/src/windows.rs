@@ -1073,7 +1073,9 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
     let installations = crate::managed_dll_entries(&plan.game_id, &game_root)
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    let releases = base.join("cache/releases").canonicalize()?;
+    // A root that does not exist yet, such as the release cache before the
+    // first download, allows no sources but does not block the others.
+    let releases = base.join("cache/releases").canonicalize().ok();
     let backups = base.join("backups/objects");
     let backups = backups.canonicalize().ok();
     let imports = base.join("imports/objects");
@@ -1127,7 +1129,9 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
         let backup_source = backups
             .as_ref()
             .is_some_and(|root| source.starts_with(root));
-        let release_source = source.starts_with(&releases);
+        let release_source = releases
+            .as_ref()
+            .is_some_and(|root| source.starts_with(root));
         if (!release_source && !backup_source && !imported_source)
             || hash_file(&source)? != swap.source_sha256
         {
