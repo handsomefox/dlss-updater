@@ -304,7 +304,7 @@ struct ApiError {
     message: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ApiRelease {
     tag_name: String,
     published_at: String,
@@ -315,7 +315,7 @@ struct ApiRelease {
     assets: Vec<ApiAsset>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 struct ApiAsset {
     name: String,
     browser_download_url: String,
@@ -588,7 +588,22 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(select_asset(release).unwrap().unwrap().download_url, "good");
+        assert_eq!(
+            select_asset(release.clone()).unwrap().unwrap().download_url,
+            "good"
+        );
+        // The same release, eligible asset and all, is skipped as a draft or
+        // a prerelease.
+        let draft = ApiRelease {
+            draft: true,
+            ..release.clone()
+        };
+        assert!(select_asset(draft).unwrap().is_none());
+        let prerelease = ApiRelease {
+            prerelease: true,
+            ..release
+        };
+        assert!(select_asset(prerelease).unwrap().is_none());
     }
 
     fn arch_release(assets: &[(&str, &str)]) -> ApiRelease {
