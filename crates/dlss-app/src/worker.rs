@@ -561,7 +561,14 @@ fn load_imports(events: &EventSink) -> dlss_core::ImportIndex {
             )
             .map_err(WorkerError::from)
     }) {
-        Ok(index) => index,
+        Ok((index, rejected)) => {
+            for line in rejected {
+                events.send(Event::Warning(format!(
+                    "An imported DLL failed its checks and is not offered: {line}"
+                )));
+            }
+            index
+        }
         Err(error) => {
             events.send(Event::Warning(format!(
                 "Could not load imported DLLs: {error}"

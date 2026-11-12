@@ -122,7 +122,10 @@ impl ImportStore {
             imported_unix,
             content_path,
         };
-        let mut index = self.load_validated_index(inspector, verifier)?;
+        // The raw index: a record that fails validation stays as it was and is
+        // left out when the index is next loaded, and it does not block this
+        // import. Importing the same DLL again replaces it.
+        let mut index = self.load_index()?;
         if let Some(existing) = index.records.iter_mut().find(|item| item.sha256 == sha256) {
             existing.clone_from(&record);
         } else {
@@ -146,46 +149,70 @@ impl ImportStore {
     }
 
     /// Loads the import index and revalidates every object before reuse.
+    /// Returns the records that pass, and one line for each that does not:
+    /// a damaged import is left out without hiding the others.
     ///
     /// # Errors
-    /// Returns an error when an index entry escapes the object store or its
-    /// name, hash, PE metadata, version, or NVIDIA signature no longer agree.
+    /// Returns an error when the index itself cannot be read.
     pub fn load_validated_index(
         &self,
         inspector: &dyn DllInspector,
         verifier: &dyn TrustVerifier,
-    ) -> Result<ImportIndex, CoreError> {
-        let index = self.load_index()?;
-        for record in &index.records {
-            if DllKind::classify(&record.file_name).is_none() {
-                return Err(CoreError::Validation(
-                    "import index contains an unmanaged DLL name".into(),
-                ));
-            }
-            let expected_path = self.root.join("objects").join(hex_hash(record.sha256));
-            if record.content_path != expected_path
-                || !expected_path.is_file()
-                || expected_path.metadata()?.len() > MAX_IMPORTED_DLL_BYTES
-                || hash_file(&expected_path)? != record.sha256
-            {
-                return Err(CoreError::Validation(
-                    "import index object path or hash is invalid".into(),
-                ));
-            }
-            let metadata = inspector.inspect(&expected_path)?;
-            let trust = verifier.verify(&expected_path, TrustPolicy::Strict)?;
-            if !metadata.x86_64
-                || metadata.version != Some(record.version)
-                || metadata.sha256 != record.sha256
-                || trust.signature != SignatureStatus::Trusted
-                || !trust.signer.as_deref().is_some_and(is_nvidia_signer)
-            {
-                return Err(CoreError::Validation(
-                    "import index object failed NVIDIA trust validation".into(),
-                ));
-            }
+    ) -> Result<(ImportIndex, Vec<String>), CoreError> {
+        let mut index = self.load_index()?;
+        let mut rejected = Vec::new();
+        index.records.retain(
+            |record| match self.validate_record(record, inspector, verifier) {
+                Ok(()) => true,
+                Err(error) => {
+                    rejected.push(format!(
+                        "{} {}: {error}",
+                        record.file_name.to_string_lossy(),
+                        record.version
+                    ));
+                    false
+                }
+            },
+        );
+        Ok((index, rejected))
+    }
+
+    /// Checks that one record's object is inside the store, and that its name,
+    /// hash, PE metadata, version, and NVIDIA signature still agree.
+    fn validate_record(
+        &self,
+        record: &ImportedDllRecord,
+        inspector: &dyn DllInspector,
+        verifier: &dyn TrustVerifier,
+    ) -> Result<(), CoreError> {
+        if DllKind::classify(&record.file_name).is_none() {
+            return Err(CoreError::Validation(
+                "import index contains an unmanaged DLL name".into(),
+            ));
         }
-        Ok(index)
+        let expected_path = self.root.join("objects").join(hex_hash(record.sha256));
+        if record.content_path != expected_path
+            || !expected_path.is_file()
+            || expected_path.metadata()?.len() > MAX_IMPORTED_DLL_BYTES
+            || hash_file(&expected_path)? != record.sha256
+        {
+            return Err(CoreError::Validation(
+                "import index object path or hash is invalid".into(),
+            ));
+        }
+        let metadata = inspector.inspect(&expected_path)?;
+        let trust = verifier.verify(&expected_path, TrustPolicy::Strict)?;
+        if !metadata.x86_64
+            || metadata.version != Some(record.version)
+            || metadata.sha256 != record.sha256
+            || trust.signature != SignatureStatus::Trusted
+            || !trust.signer.as_deref().is_some_and(is_nvidia_signer)
+        {
+            return Err(CoreError::Validation(
+                "import index object failed NVIDIA trust validation".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Removes one imported object and its index entry.
@@ -362,6 +389,40 @@ mod tests {
             .set_len(MAX_IMPORTED_DLL_BYTES + 1)
             .unwrap();
         assert!(store.import(&oversize, &inspector, &trusted, 1).is_err());
+    }
+
+    #[test]
+    fn a_damaged_import_hides_only_itself() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ImportStore::new(directory.path().join("imports"));
+        let inspector = Inspector {
+            x64: true,
+            version: true,
+        };
+        let trusted = Trust {
+            status: SignatureStatus::Trusted,
+            subject: Some("NVIDIA Corporation".into()),
+        };
+        let import = |name: &str, bytes: &[u8]| {
+            let folder = directory.path().join(name);
+            fs::create_dir_all(&folder).unwrap();
+            let source = folder.join("nvngx_dlss.dll");
+            fs::write(&source, bytes).unwrap();
+            store.import(&source, &inspector, &trusted, 1).unwrap()
+        };
+        let damaged = import("a", b"first dll");
+        let kept = import("b", b"second dll");
+        fs::write(&damaged.content_path, b"changed on disk").unwrap();
+
+        let (index, rejected) = store.load_validated_index(&inspector, &trusted).unwrap();
+        assert_eq!(index.records, std::slice::from_ref(&kept));
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+
+        // A new import still works, and the damaged record stays out.
+        let added = import("c", b"third dll");
+        let (index, rejected) = store.load_validated_index(&inspector, &trusted).unwrap();
+        assert_eq!(index.records, [kept, added]);
+        assert_eq!(rejected.len(), 1);
     }
 
     #[test]
