@@ -802,8 +802,9 @@ mod tests {
 
     #[test]
     fn skips_untrusted_candidate_when_trusted_dlls_remain() {
+        // An eligible name, so only the trust check can leave it out.
         let (directory, path) = archive(&[
-            ("bin/x64/NvLowLatencyVk.dll", b"untrusted"),
+            ("bin/x64/nvngx_dlssg.dll", b"untrusted"),
             ("bin/x64/nvngx_dlss.dll", b"trusted"),
         ]);
         let output = directory.path().join("output");
@@ -817,7 +818,7 @@ mod tests {
         .unwrap();
         assert_eq!(dlls.dlls.len(), 1);
         assert_eq!(dlls.dlls[0].file_name, "nvngx_dlss.dll");
-        assert!(!output.join("NvLowLatencyVk.dll").exists());
+        assert!(!output.join("nvngx_dlssg.dll").exists());
     }
 
     #[test]
