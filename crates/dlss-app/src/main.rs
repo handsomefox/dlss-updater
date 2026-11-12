@@ -1378,6 +1378,16 @@ impl DlssApp {
                 self.tool_error = Some("no restore point is available".into());
                 return;
             };
+            // The helper restores without confirmation only over the value
+            // this restore point left. A value changed since, even one the
+            // Tools view has already shown, needs the same confirmation as
+            // above, or every click would elevate and fail.
+            if point.state_after_hash != current_hash && !self.tool_runtime.stale_confirmed {
+                self.tool_runtime.observed_hash = Some(current_hash);
+                self.tool_runtime.stale_confirmed = true;
+                self.tool_error = Some("The registry value changed outside DLSS Updater after the last change. Review the current state, then click Restore again to confirm overwriting it.".into());
+                return;
+            }
             Some(point)
         } else {
             None
