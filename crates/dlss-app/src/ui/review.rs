@@ -143,6 +143,8 @@ impl DlssApp {
                                     .get(&swap.installation)
                                     .cloned()
                                     .unwrap_or(dlss_core::DesiredDll::KeepInstalled);
+                                let desired =
+                                    pin_latest(desired, swap.source_sha256, &self.releases);
                                 rows.push(ReviewRow {
                                     game_id: game.id.clone(),
                                     game_name: game.name.clone(),
@@ -636,9 +638,65 @@ pub(crate) fn profile_preview_error_label(error: &str) -> &'static str {
     }
 }
 
+/// Pins a staged "latest official" target to the release the preview
+/// resolved, `source_sha256`. The worker would otherwise resolve "latest"
+/// again when it applies, and a catalog refresh while the dialog is open
+/// would install a version nobody reviewed.
+fn pin_latest(
+    desired: dlss_core::DesiredDll,
+    source_sha256: [u8; 32],
+    releases: &[dlss_core::CachedRelease],
+) -> dlss_core::DesiredDll {
+    if desired != dlss_core::DesiredDll::LatestOfficial {
+        return desired;
+    }
+    releases
+        .iter()
+        .flat_map(|release| release.dlls.iter())
+        .find(|dll| dll.sha256 == source_sha256)
+        .map_or(desired, |dll| dlss_core::DesiredDll::Cached {
+            release: dll.release.clone(),
+            sha256: source_sha256,
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_staged_latest_target_is_pinned_to_the_previewed_release() {
+        let dll = |release: &str, byte: u8| dlss_core::CatalogDll {
+            file_name: "nvngx_dlss.dll".into(),
+            version: dlss_core::DllVersion::new(310, u16::from(byte), 0, 0),
+            sha256: [byte; 32],
+            source: std::path::PathBuf::from("x"),
+            release: dlss_core::ReleaseId::from(release),
+        };
+        let release = |id: &str, byte: u8| dlss_core::CachedRelease {
+            metadata: dlss_core::ReleaseMetadata {
+                id: dlss_core::ReleaseId::from(id),
+                tag: id.into(),
+                asset_name: format!("{id}.zip"),
+                published_unix: 0,
+            },
+            state: dlss_core::ReleaseState::Ready,
+            dlls: vec![dll(id, byte)],
+            validation: dlss_core::ReleaseValidation::Full,
+        };
+        let releases = [release("v2", 2), release("v1", 1)];
+        assert_eq!(
+            pin_latest(dlss_core::DesiredDll::LatestOfficial, [1; 32], &releases),
+            dlss_core::DesiredDll::Cached {
+                release: dlss_core::ReleaseId::from("v1"),
+                sha256: [1; 32],
+            }
+        );
+        assert_eq!(
+            pin_latest(dlss_core::DesiredDll::KeepInstalled, [1; 32], &releases),
+            dlss_core::DesiredDll::KeepInstalled
+        );
+    }
 
     #[test]
     fn profile_preview_errors_hide_internal_installation_ids() {
