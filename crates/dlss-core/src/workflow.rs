@@ -430,18 +430,15 @@ fn execute_swap(
     )?;
     let installed = inspector.inspect_structure(&swap.target_path)?;
     if installed.sha256 != swap.source_sha256 {
-        let verification = CoreError::Validation("replacement verification hash mismatch".into());
-        if let Err(rollback) = replacer.replace(
-            &swap.target_path,
-            installed.sha256,
-            &backup.content_path,
-            backup.sha256,
-        ) {
-            return Err(CoreError::Validation(format!(
-                "{verification}; backup rollback failed: {rollback}"
-            )));
-        }
-        return Err(verification);
+        // Something, such as a launcher repairing its files, wrote another
+        // DLL right after the swap. Putting the backup over it would destroy
+        // a file nothing backed up, so it stays; the backup committed above
+        // is in the restore history.
+        return Err(CoreError::Validation(
+            "the DLL changed again right after it was replaced, so it was left as it is; \
+             its backup is in the restore history"
+                .into(),
+        ));
     }
     Ok((installed, backup))
 }
@@ -697,6 +694,27 @@ mod tests {
             fs::write(target, self.bytes)?;
             self.inner
                 .replace(target, expected_target_hash, source, expected_source_hash)
+        }
+    }
+
+    /// Hands over to [`CopyReplacer`], then rewrites the target, the way a
+    /// launcher repairing its files would right after the swap.
+    struct RewriteAfterReplacer {
+        inner: CopyReplacer,
+        bytes: &'static [u8],
+    }
+    impl AtomicFileReplacer for RewriteAfterReplacer {
+        fn replace(
+            &self,
+            target: &Path,
+            expected_target_hash: [u8; 32],
+            source: &Path,
+            expected_source_hash: [u8; 32],
+        ) -> Result<(), CoreError> {
+            self.inner
+                .replace(target, expected_target_hash, source, expected_source_hash)?;
+            fs::write(target, self.bytes)?;
+            Ok(())
         }
     }
 
@@ -1194,6 +1212,51 @@ mod tests {
                 .contains("stale")
         );
         assert!(!dir.path().join("backups/objects").exists());
+    }
+
+    #[test]
+    fn a_target_rewritten_after_the_swap_is_left_as_it_is() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target.dll");
+        let source = dir.path().join("source.dll");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&source, b"new").unwrap();
+        let plan = OperationPlan {
+            nonce: "n".into(),
+            swaps: vec![PlannedSwap {
+                game: GameId("g".into()),
+                installation: DllInstallationId("d".into()),
+                target_path: target.clone(),
+                expected_sha256: hash_file(&target).unwrap(),
+                source_path: source.clone(),
+                source_sha256: hash_file(&source).unwrap(),
+                comparison: Comparison::Upgrade,
+            }],
+        };
+        let backups = BackupStore::new(dir.path().join("backups"));
+        let result = execute_plan(
+            &plan,
+            &BytesInspector,
+            &RewriteAfterReplacer {
+                inner: CopyReplacer {
+                    fail: Mutex::new(Vec::new()),
+                },
+                bytes: b"launcher repair",
+            },
+            &backups,
+            0,
+        );
+        assert!(
+            result.swaps[0]
+                .result
+                .as_ref()
+                .unwrap_err()
+                .contains("left as it is")
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"launcher repair");
+        // The original is still backed up and can be restored by hand.
+        let index = backups.load_index().unwrap();
+        assert_eq!(fs::read(&index.records[0].content_path).unwrap(), b"old");
     }
 
     #[test]
