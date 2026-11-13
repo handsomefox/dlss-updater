@@ -28,7 +28,7 @@ tempfile = "=3.27.0"
 thiserror = "=2.0.21"
 tracing = "=0.1.44"
 walkdir = "=2.5.0"
-zip = { version = "=9.2.0", default-features = false, features = ["deflate"] }
+zip = { version = "=9.4.1", default-features = false, features = ["deflate"] }
 
 [profile.release]
 lto = "thin"
