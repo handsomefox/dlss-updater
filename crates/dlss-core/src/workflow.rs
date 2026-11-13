@@ -697,11 +697,13 @@ mod tests {
         }
     }
 
-    /// Hands over to [`CopyReplacer`], then rewrites the target, the way a
-    /// launcher repairing its files would right after the swap.
+    /// Hands over to [`CopyReplacer`], then rewrites the target after the
+    /// first swap only, the way a launcher repairing its files would. A later
+    /// replacement, such as a rollback, is counted and left to stand.
     struct RewriteAfterReplacer {
         inner: CopyReplacer,
         bytes: &'static [u8],
+        calls: Mutex<usize>,
     }
     impl AtomicFileReplacer for RewriteAfterReplacer {
         fn replace(
@@ -713,7 +715,11 @@ mod tests {
         ) -> Result<(), CoreError> {
             self.inner
                 .replace(target, expected_target_hash, source, expected_source_hash)?;
-            fs::write(target, self.bytes)?;
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            if *calls == 1 {
+                fs::write(target, self.bytes)?;
+            }
             Ok(())
         }
     }
@@ -1234,18 +1240,14 @@ mod tests {
             }],
         };
         let backups = BackupStore::new(dir.path().join("backups"));
-        let result = execute_plan(
-            &plan,
-            &BytesInspector,
-            &RewriteAfterReplacer {
-                inner: CopyReplacer {
-                    fail: Mutex::new(Vec::new()),
-                },
-                bytes: b"launcher repair",
+        let replacer = RewriteAfterReplacer {
+            inner: CopyReplacer {
+                fail: Mutex::new(Vec::new()),
             },
-            &backups,
-            0,
-        );
+            bytes: b"launcher repair",
+            calls: Mutex::new(0),
+        };
+        let result = execute_plan(&plan, &BytesInspector, &replacer, &backups, 0);
         assert!(
             result.swaps[0]
                 .result
@@ -1254,6 +1256,8 @@ mod tests {
                 .contains("left as it is")
         );
         assert_eq!(fs::read(&target).unwrap(), b"launcher repair");
+        // No rollback replaced the launcher's file.
+        assert_eq!(*replacer.calls.lock().unwrap(), 1);
         // The original is still backed up and can be restored by hand.
         let index = backups.load_index().unwrap();
         assert_eq!(fs::read(&index.records[0].content_path).unwrap(), b"old");
