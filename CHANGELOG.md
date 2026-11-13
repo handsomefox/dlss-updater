@@ -19,9 +19,10 @@ Releases before 1.1.3 are listed on the [releases page](https://github.com/hands
   files, DLSS Updater leaves it alone instead of putting the backup over it. The original is still
   in the restore history.
 - Updates installed from this version on are safer with two copies of the app open. A copy that
-  starts while another installs an update no longer deletes that download, and a copy no longer
-  installs an older update over a newer one that another copy installed. Files you keep beside the
-  app, and logs you renamed to keep, are no longer deleted at startup.
+  starts while another installs an update no longer deletes that download, and a copy that finds
+  another copy already installed an update asks you to restart instead of installing its own, which
+  could be older. Files you keep beside the app, and logs you renamed to keep, are no longer deleted
+  at startup.
 
 ## 1.4.9
 
