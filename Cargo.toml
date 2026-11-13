@@ -10,10 +10,10 @@ repository = "https://github.com/handsomefox/dlss-updater"
 description = "A Windows desktop app for safely updating official NVIDIA DLSS and Streamline DLLs"
 
 [workspace.dependencies]
-app-diagnostics = { git = "https://github.com/handsomefox/app-internals", tag = "v0.2.2", version = "=0.2.2" }
-app-folders = { git = "https://github.com/handsomefox/app-internals", tag = "v0.2.2", version = "=0.2.2" }
-app-update = { git = "https://github.com/handsomefox/app-internals", tag = "v0.2.2", version = "=0.2.2" }
-app-update-ui = { git = "https://github.com/handsomefox/app-internals", tag = "v0.2.2", version = "=0.2.2" }
+app-diagnostics = { git = "https://github.com/handsomefox/app-internals", tag = "v0.2.3", version = "=0.2.3" }
+app-folders = { git = "https://github.com/handsomefox/app-internals", tag = "v0.2.3", version = "=0.2.3" }
+app-update = { git = "https://github.com/handsomefox/app-internals", tag = "v0.2.3", version = "=0.2.3" }
+app-update-ui = { git = "https://github.com/handsomefox/app-internals", tag = "v0.2.3", version = "=0.2.3" }
 crossbeam-channel = "=0.5.17"
 eframe = { version = "=0.37.0", default-features = false, features = ["clipboard", "default_fonts", "glow", "links", "persistence", "x11"] }
 egui_extras = "=0.37.0"
