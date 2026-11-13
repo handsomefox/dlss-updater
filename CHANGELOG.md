@@ -2,6 +2,27 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.4.10
+
+- Apply an imported DLL or restore a backup to a game in a protected folder, such as Program Files,
+  before any official release has been downloaded. The administrator helper failed with "The system
+  cannot find the file specified" when the release cache did not exist.
+- One damaged imported DLL no longer hides every import. The damaged one is left out with a warning,
+  the others stay usable, and new imports work. Importing the same DLL again replaces the damaged
+  one.
+- **Restore previous** for the DLSS indicator asks for confirmation when the value was changed
+  outside DLSS Updater, then restores it. Clicking it asked for administrator rights and failed
+  every time.
+- Reviewing staged changes pins **Latest official** to the release shown. A newer release found
+  while the review was open could be installed instead.
+- When a DLL changes again right after it was replaced, for example because a launcher repaired its
+  files, DLSS Updater leaves it alone instead of putting the backup over it. The original is still
+  in the restore history.
+- Updates installed from this version on are safer with two copies of the app open. A copy that
+  starts while another installs an update no longer deletes that download, and a copy no longer
+  installs an older update over a newer one that another copy installed. Files you keep beside the
+  app, and logs you renamed to keep, are no longer deleted at startup.
+
 ## 1.4.9
 
 - Apply an imported DLL. Selecting one always failed with "selected official release is

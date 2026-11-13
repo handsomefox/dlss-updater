@@ -8,7 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-dlss-core = { version = "=1.4.9", path = "../dlss-core" }
+dlss-core = { version = "=1.4.10", path = "../dlss-core" }
 jiff.workspace = true
 reqwest.workspace = true
 # reqwest's `rustls-no-provider` feature deliberately selects no crypto backend;
