@@ -88,7 +88,9 @@ impl ImportStore {
         let objects = self.root.join("objects");
         fs::create_dir_all(&objects)?;
         let content_path = objects.join(hex_hash(sha256));
-        if !content_path.exists() {
+        // An object already there is kept only when it is intact. A damaged
+        // one is replaced, so importing the same DLL again repairs it.
+        if hash_file(&content_path).ok() != Some(sha256) {
             // The copy commits only once its hash matches, so the object
             // path never holds partial or unexpected bytes.
             copy_flush_hash(source, &content_path, sha256)?;
@@ -421,8 +423,15 @@ mod tests {
         // A new import still works, and the damaged record stays out.
         let added = import("c", b"third dll");
         let (index, rejected) = store.load_validated_index(&inspector, &trusted).unwrap();
-        assert_eq!(index.records, [kept, added]);
+        assert_eq!(index.records, [kept.clone(), added.clone()]);
         assert_eq!(rejected.len(), 1);
+
+        // Importing the damaged DLL again repairs it.
+        let repaired = import("d", b"first dll");
+        assert_eq!(fs::read(&repaired.content_path).unwrap(), b"first dll");
+        let (index, rejected) = store.load_validated_index(&inspector, &trusted).unwrap();
+        assert_eq!(index.records, [repaired, kept, added]);
+        assert!(rejected.is_empty(), "{rejected:?}");
     }
 
     #[test]
