@@ -363,12 +363,17 @@ impl DlssApp {
             .iter()
             .filter(|backup| dlss_core::same_path(&backup.original_path, &dll.path))
             .map(|backup| {
+                let unsigned = if self.unsigned_backups.contains(&backup.sha256) {
+                    " · not signed by NVIDIA"
+                } else {
+                    ""
+                };
                 (
                     dlss_core::DesiredDll::Restore {
                         backup_sha256: backup.sha256,
                     },
                     format!(
-                        "Restore backup {} · {}",
+                        "Restore backup {} · {}{unsigned}",
                         backup
                             .version
                             .map_or_else(|| "Unknown".into(), |version| version.to_string()),
@@ -493,6 +498,7 @@ fn signature_cell(ui: &mut egui::Ui, status: dlss_core::SignatureStatus) {
         dlss_core::SignatureStatus::Untrusted => (icons::SHIELD_WARNING, theme::DANGER),
         dlss_core::SignatureStatus::Unsigned => (icons::SHIELD_SLASH, theme::WARNING),
         dlss_core::SignatureStatus::Unavailable => (icons::QUESTION, theme::TEXT_FAINT),
+        dlss_core::SignatureStatus::RevocationOffline => (icons::SHIELD_WARNING, theme::WARNING),
     };
     ui.label(widgets::icon(icon, 15.0, color))
         .on_hover_text(signature_label(status));

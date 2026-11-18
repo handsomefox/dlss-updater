@@ -1,11 +1,11 @@
 use crate::{
     CatalogDll, CoreError, DllInspector, DllKind, DllVersion, ReleaseId, SignatureStatus,
-    TrustPolicy, TrustVerifier, copy_flush_hash, hash_file, hex_hash, read_versioned_json,
-    write_versioned_json,
+    TrustPolicy, TrustReport, TrustVerifier, copy_flush_hash, hash_file, hex_hash, lock_store,
+    read_versioned_json, same_file_name, write_versioned_json,
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
 };
@@ -72,18 +72,13 @@ impl ImportStore {
         let _version = metadata
             .version
             .ok_or_else(|| CoreError::Validation("import has no version resource".into()))?;
+        check_original_file_name(inspector, source, file_name)?;
         let trust = verifier.verify(source, TrustPolicy::Strict)?;
-        if trust.signature != SignatureStatus::Trusted {
-            return Err(CoreError::Validation(
-                "import signature is not trusted".into(),
-            ));
+        if let Some(problem) = nvidia_trust_problem(&trust) {
+            return Err(CoreError::Validation(format!(
+                "the DLL cannot be imported: {problem}"
+            )));
         }
-        let _signer = trust
-            .signer
-            .filter(|subject| is_nvidia_signer(subject))
-            .ok_or_else(|| {
-                CoreError::Validation("import is not signed by NVIDIA Corporation".into())
-            })?;
         let sha256 = hash_file(source)?;
         let objects = self.root.join("objects");
         fs::create_dir_all(&objects)?;
@@ -104,18 +99,14 @@ impl ImportStore {
         let version = stored_metadata
             .version
             .ok_or_else(|| CoreError::Validation("stored import has no version resource".into()))?;
+        check_original_file_name(inspector, &content_path, file_name)?;
         let stored_trust = verifier.verify(&content_path, TrustPolicy::Strict)?;
-        if stored_trust.signature != SignatureStatus::Trusted {
-            return Err(CoreError::Validation(
-                "stored import signature is not trusted".into(),
-            ));
+        if let Some(problem) = nvidia_trust_problem(&stored_trust) {
+            return Err(CoreError::Validation(format!(
+                "the stored copy of the DLL failed its checks: {problem}"
+            )));
         }
-        let signer = stored_trust
-            .signer
-            .filter(|subject| is_nvidia_signer(subject))
-            .ok_or_else(|| {
-                CoreError::Validation("stored import is not signed by NVIDIA Corporation".into())
-            })?;
+        let signer = stored_trust.signer.unwrap_or_default();
         let record = ImportedDllRecord {
             file_name: file_name.to_os_string(),
             version,
@@ -126,7 +117,9 @@ impl ImportStore {
         };
         // The raw index: a record that fails validation stays as it was and is
         // left out when the index is next loaded, and it does not block this
-        // import. Importing the same DLL again replaces it.
+        // import. Importing the same DLL again replaces it. The lock keeps a
+        // second window's import or removal from being lost.
+        let _lock = lock_store(&self.root)?;
         let mut index = self.load_index()?;
         if let Some(existing) = index.records.iter_mut().find(|item| item.sha256 == sha256) {
             existing.clone_from(&record);
@@ -203,16 +196,18 @@ impl ImportStore {
             ));
         }
         let metadata = inspector.inspect(&expected_path)?;
-        let trust = verifier.verify(&expected_path, TrustPolicy::Strict)?;
         if !metadata.x86_64
             || metadata.version != Some(record.version)
             || metadata.sha256 != record.sha256
-            || trust.signature != SignatureStatus::Trusted
-            || !trust.signer.as_deref().is_some_and(is_nvidia_signer)
         {
             return Err(CoreError::Validation(
-                "import index object failed NVIDIA trust validation".into(),
+                "import index object metadata is invalid".into(),
             ));
+        }
+        check_original_file_name(inspector, &expected_path, &record.file_name)?;
+        let trust = verifier.verify(&expected_path, TrustPolicy::Strict)?;
+        if let Some(problem) = nvidia_trust_problem(&trust) {
+            return Err(CoreError::Validation(problem.into()));
         }
         Ok(())
     }
@@ -222,6 +217,7 @@ impl ImportStore {
     /// # Errors
     /// Returns an error when deletion or persistence fails.
     pub fn remove(&self, sha256: [u8; 32]) -> Result<(), CoreError> {
+        let _lock = lock_store(&self.root)?;
         let mut index = self.load_index()?;
         index.records.retain(|record| record.sha256 != sha256);
         let object = self.root.join("objects").join(hex_hash(sha256));
@@ -229,6 +225,55 @@ impl ImportStore {
             fs::remove_file(object)?;
         }
         write_versioned_json(&self.root.join("index.json"), IMPORT_SCHEMA_VERSION, &index)
+    }
+}
+
+/// Why a trust report does not prove an NVIDIA signature, worded for the
+/// user, or `None` when it does.
+///
+/// A file whose revocation check could not run is never trusted under the
+/// strict policy, but it gets its own reason, because connecting to the
+/// internet fixes it.
+#[must_use]
+pub fn nvidia_trust_problem(trust: &TrustReport) -> Option<&'static str> {
+    match trust.signature {
+        SignatureStatus::Trusted if trust.signer.as_deref().is_some_and(is_nvidia_signer) => None,
+        SignatureStatus::Trusted => Some("it is not signed by NVIDIA Corporation"),
+        SignatureStatus::RevocationOffline => {
+            Some("revocation could not be checked (offline). Connect to the internet and try again")
+        }
+        SignatureStatus::Unsigned => Some("it is not signed"),
+        SignatureStatus::Untrusted | SignatureStatus::Unavailable => {
+            Some("its signature is not trusted")
+        }
+    }
+}
+
+/// Checks that the `OriginalFilename` in a DLL's version resource is
+/// `expected`, ignoring ASCII case.
+///
+/// The name the user gave the file decides which installed DLL an import can
+/// replace. NVIDIA writes each DLL's real name into its version resource, so a
+/// renamed DLL, such as Frame Generation saved as `nvngx_dlss.dll`, is
+/// refused.
+///
+/// # Errors
+/// Returns an error when the version resource cannot be read, has no
+/// `OriginalFilename`, or names another file.
+pub fn check_original_file_name(
+    inspector: &dyn DllInspector,
+    path: &Path,
+    expected: &OsStr,
+) -> Result<(), CoreError> {
+    match inspector.original_file_name(path)? {
+        Some(original) if same_file_name(OsStr::new(&original), expected) => Ok(()),
+        Some(original) => Err(CoreError::Validation(format!(
+            "the DLL's version resource names it {original}, not {}",
+            expected.to_string_lossy()
+        ))),
+        None => Err(CoreError::Validation(
+            "the DLL's version resource has no original file name".into(),
+        )),
     }
 }
 
@@ -271,6 +316,8 @@ mod tests {
     struct Inspector {
         x64: bool,
         version: bool,
+        /// The `OriginalFilename` every inspected file reports.
+        original: Option<&'static str>,
     }
     impl DllInspector for Inspector {
         fn inspect(&self, path: &Path) -> Result<DllMetadata, CoreError> {
@@ -281,6 +328,10 @@ mod tests {
                 signature: SignatureStatus::Trusted,
                 x86_64: self.x64,
             })
+        }
+
+        fn original_file_name(&self, _path: &Path) -> Result<Option<String>, CoreError> {
+            Ok(self.original.map(str::to_owned))
         }
     }
 
@@ -312,6 +363,7 @@ mod tests {
         let inspector = Inspector {
             x64: true,
             version: true,
+            original: Some("nvngx_dlss.dll"),
         };
         let trusted = Trust {
             status: SignatureStatus::Trusted,
@@ -347,7 +399,8 @@ mod tests {
                     &source,
                     &Inspector {
                         x64: false,
-                        version: true
+                        version: true,
+                        original: Some("nvngx_dlss.dll"),
                     },
                     &trusted,
                     42
@@ -360,12 +413,121 @@ mod tests {
                     &source,
                     &Inspector {
                         x64: true,
-                        version: false
+                        version: false,
+                        original: Some("nvngx_dlss.dll"),
                     },
                     &trusted,
                     42
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn rejects_a_renamed_dll_and_one_without_an_original_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("NVNGX_DLSS.DLL");
+        fs::write(&source, b"dll bytes").unwrap();
+        let store = ImportStore::new(directory.path().join("imports"));
+        let trusted = Trust {
+            status: SignatureStatus::Trusted,
+            subject: Some("NVIDIA Corporation".into()),
+        };
+        let inspector = |original| Inspector {
+            x64: true,
+            version: true,
+            original,
+        };
+        // Frame Generation renamed to the Super Resolution file name.
+        let renamed = store.import(&source, &inspector(Some("nvngx_dlssg.dll")), &trusted, 1);
+        assert!(
+            renamed.unwrap_err().to_string().contains("nvngx_dlssg.dll"),
+            "a renamed DLL must be refused"
+        );
+        assert!(
+            store
+                .import(&source, &inspector(None), &trusted, 1)
+                .is_err()
+        );
+        assert_eq!(store.load_index().unwrap().records.len(), 0);
+        // The case of the name does not matter.
+        store
+            .import(&source, &inspector(Some("nvngx_dlss.dll")), &trusted, 1)
+            .unwrap();
+
+        // An index record whose object reports another name is left out.
+        let (index, rejected) = store
+            .load_validated_index(&inspector(Some("nvngx_dlssd.dll")), &trusted)
+            .unwrap();
+        assert_eq!(index.records.len(), 0);
+        assert_eq!(rejected.len(), 1);
+    }
+
+    #[test]
+    fn an_offline_revocation_check_is_named_in_the_rejection() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("nvngx_dlss.dll");
+        fs::write(&source, b"dll bytes").unwrap();
+        let store = ImportStore::new(directory.path().join("imports"));
+        let inspector = Inspector {
+            x64: true,
+            version: true,
+            original: Some("nvngx_dlss.dll"),
+        };
+        let offline = Trust {
+            status: SignatureStatus::RevocationOffline,
+            subject: Some("NVIDIA Corporation".into()),
+        };
+        let error = store
+            .import(&source, &inspector, &offline, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("revocation could not be checked (offline)"),
+            "{error}"
+        );
+
+        let trusted = Trust {
+            status: SignatureStatus::Trusted,
+            subject: Some("NVIDIA Corporation".into()),
+        };
+        store.import(&source, &inspector, &trusted, 1).unwrap();
+        let (index, rejected) = store.load_validated_index(&inspector, &offline).unwrap();
+        assert_eq!(index.records.len(), 0);
+        assert!(rejected[0].contains("(offline)"), "{rejected:?}");
+    }
+
+    #[test]
+    fn concurrent_imports_keep_every_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("imports");
+        let inspector = Inspector {
+            x64: true,
+            version: true,
+            original: Some("nvngx_dlss.dll"),
+        };
+        let trusted = Trust {
+            status: SignatureStatus::Trusted,
+            subject: Some("NVIDIA Corporation".into()),
+        };
+        std::thread::scope(|scope| {
+            for index in 0..8_u8 {
+                let (root, inspector, trusted) = (&root, &inspector, &trusted);
+                let folder = directory.path().join(format!("source-{index}"));
+                scope.spawn(move || {
+                    fs::create_dir_all(&folder).unwrap();
+                    let source = folder.join("nvngx_dlss.dll");
+                    fs::write(&source, [index; 16]).unwrap();
+                    // Each thread has its own store value, as two processes would.
+                    ImportStore::new(root)
+                        .import(&source, inspector, trusted, 1)
+                        .unwrap();
+                });
+            }
+        });
+        assert_eq!(
+            ImportStore::new(&root).load_index().unwrap().records.len(),
+            8
         );
     }
 
@@ -376,6 +538,7 @@ mod tests {
         let inspector = Inspector {
             x64: true,
             version: true,
+            original: Some("nvngx_dlss.dll"),
         };
         let trusted = Trust {
             status: SignatureStatus::Trusted,
@@ -400,6 +563,7 @@ mod tests {
         let inspector = Inspector {
             x64: true,
             version: true,
+            original: Some("nvngx_dlss.dll"),
         };
         let trusted = Trust {
             status: SignatureStatus::Trusted,
@@ -431,7 +595,7 @@ mod tests {
         assert_eq!(fs::read(&repaired.content_path).unwrap(), b"first dll");
         let (index, rejected) = store.load_validated_index(&inspector, &trusted).unwrap();
         assert_eq!(index.records, [repaired, kept, added]);
-        assert!(rejected.is_empty(), "{rejected:?}");
+        assert_eq!(rejected, Vec::<String>::new());
     }
 
     #[test]

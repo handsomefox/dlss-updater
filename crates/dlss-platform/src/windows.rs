@@ -4,28 +4,33 @@
 use dlss_core::{
     AtomicFileReplacer, BackupStore, BatchResult, CoreError, DLSS_INDICATOR_TOOL_ID,
     DiscoveryOutcome, DiscoveryStatus, DllInspector, DllMetadata, DllStructure, DllVersion,
-    ElevatedFilePlan, ElevatedHelperPlan, GameId, GameInstall, GameLocator, KnownDirectories,
-    NativeTrustFailure, OperationPlan, PlannedSwap, PlatformCapabilities, PrivilegeBroker,
-    RegistryValueSnapshot, RegistryView, RevocationStatus, SignatureStatus, StoreDiscoveryReport,
-    StoreKind, SystemToolDefinition, SystemToolId, SystemToolProvider, SystemToolScope,
-    SystemToolState, ToolChangePlan, ToolChangeResult, ToolRestorePoint, TrustPolicy, TrustReport,
-    TrustVerifier, execute_plan, hash_file, hex_hash, indicator_state, now_unix,
-    read_versioned_json_bytes, write_versioned_json,
+    ElevatedFilePlan, ElevatedHelperPlan, GameId, GameInstall, GameLocator, HelperSource,
+    HelperStores, KnownDirectories, NativeTrustFailure, OperationPlan, PlannedSwap,
+    PlatformCapabilities, PrivilegeBroker, RegistryValueSnapshot, RegistryView, RevocationStatus,
+    SignatureStatus, StoreDiscoveryReport, StoreKind, SystemToolDefinition, SystemToolId,
+    SystemToolProvider, SystemToolScope, SystemToolState, ToolChangePlan, ToolChangeResult,
+    ToolRestorePoint, TrustPolicy, TrustReport, TrustVerifier, check_original_file_name,
+    execute_plan, hash_file, hex_hash, identify_helper_source, indicator_state, is_custom_root,
+    now_unix, nvidia_trust_problem, read_versioned_json_bytes, validate_indicator_restore,
+    write_versioned_json,
 };
 use object::Object;
 use sha2::{Digest, Sha256};
 use std::{
-    ffi::c_void,
+    ffi::{OsString, c_void},
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
-    os::windows::ffi::OsStrExt,
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    },
     path::{Path, PathBuf},
 };
 use windows::{
     Win32::{
         Foundation::{
-            CERT_E_REVOCATION_FAILURE, CRYPT_E_REVOCATION_OFFLINE, CloseHandle, HANDLE, HWND,
-            TRUST_E_NOSIGNATURE, WAIT_FAILED,
+            CERT_E_REVOCATION_FAILURE, CRYPT_E_REVOCATION_OFFLINE, HANDLE, HWND,
+            TRUST_E_NOSIGNATURE,
         },
         Security::Cryptography::{CERT_NAME_SIMPLE_DISPLAY_TYPE, CertGetNameStringW},
         Security::WinTrust::{
@@ -36,16 +41,20 @@ use windows::{
             WTHelperGetProvCertFromChain, WTHelperGetProvSignerFromChain,
             WTHelperProvDataFromStateData, WinVerifyTrust,
         },
+        Security::{TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY},
         Storage::FileSystem::{
             GetFileVersionInfoSizeW, GetFileVersionInfoW, MOVE_FILE_FLAGS,
             MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW, VS_FIXEDFILEINFO,
             VerQueryValueW,
         },
-        System::Threading::{INFINITE, WaitForSingleObject},
-        UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW},
-        UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        System::Com::CoTaskMemFree,
+        System::Threading::{
+            OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+            QueryFullProcessImageNameW,
+        },
+        UI::Shell::{FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
     },
-    core::{HRESULT, PCWSTR},
+    core::{HRESULT, PCWSTR, PWSTR},
 };
 use windows_registry::{CURRENT_USER, LOCAL_MACHINE, Type};
 
@@ -70,6 +79,20 @@ fn wide(path: &Path) -> Vec<u16> {
     path.as_os_str().encode_wide().chain(Some(0)).collect()
 }
 
+fn wide_text(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(Some(0)).collect()
+}
+
+/// Wraps a handle a Win32 call returned, so it is closed exactly once.
+fn owned(handle: HANDLE) -> OwnedHandle {
+    // SAFETY: every caller passes a valid handle it owns and does not close.
+    unsafe { OwnedHandle::from_raw_handle(handle.0) }
+}
+
+fn borrowed(handle: &OwnedHandle) -> HANDLE {
+    HANDLE(handle.as_raw_handle())
+}
+
 fn windows_error(error: &windows::core::Error) -> CoreError {
     CoreError::Validation(error.to_string())
 }
@@ -81,16 +104,6 @@ fn replace_error(error: &windows::core::Error) -> CoreError {
     const E_ACCESSDENIED: i32 = 0x8007_0005u32.cast_signed();
     if error.code().0 == E_ACCESSDENIED {
         CoreError::PermissionDenied
-    } else {
-        windows_error(error)
-    }
-}
-
-fn shell_execute_error(error: &windows::core::Error) -> CoreError {
-    // HRESULT_FROM_WIN32(ERROR_CANCELLED), returned when the user dismisses UAC.
-    const HRESULT_CANCELLED: i32 = 0x8007_04c7u32.cast_signed();
-    if error.code().0 == HRESULT_CANCELLED {
-        CoreError::Cancelled
     } else {
         windows_error(error)
     }
@@ -126,6 +139,10 @@ impl DllInspector for WindowsDllInspector {
             sha256: Sha256::digest(&bytes).into(),
             x86_64,
         })
+    }
+
+    fn original_file_name(&self, path: &Path) -> Result<Option<String>, CoreError> {
+        version_string(path, "OriginalFilename")
     }
 }
 
@@ -447,14 +464,94 @@ fn file_version(path: &Path) -> Result<Option<DllVersion>, CoreError> {
     }
 }
 
+/// Reads one string, such as `OriginalFilename`, from a file's version
+/// resource. Each language the resource lists is tried, then US English in
+/// the two code pages resources without a language table use.
+#[expect(
+    clippy::multiple_unsafe_ops_per_block,
+    reason = "the version-resource calls share one buffer and its validated output pointers"
+)]
+fn version_string(path: &Path, name: &str) -> Result<Option<String>, CoreError> {
+    let path = wide(path);
+    // SAFETY: `path` and every query key are NUL-terminated. `data` is a
+    // `u16` buffer, so the pointers `VerQueryValueW` returns into it are
+    // aligned for `u16`, and each slice stays within the length it reports.
+    unsafe {
+        let size = GetFileVersionInfoSizeW(PCWSTR(path.as_ptr()), None);
+        if size == 0 {
+            return Ok(None);
+        }
+        let units = usize::try_from(size)
+            .map_err(|_| CoreError::Validation("version resource is too large".into()))?
+            .div_ceil(2);
+        let mut data = vec![0_u16; units];
+        GetFileVersionInfoW(PCWSTR(path.as_ptr()), None, size, data.as_mut_ptr().cast())
+            .map_err(|error| windows_error(&error))?;
+        let mut translations = Vec::new();
+        let key = wide_text(r"\VarFileInfo\Translation");
+        let mut info: *mut c_void = std::ptr::null_mut();
+        let mut length = 0_u32;
+        if VerQueryValueW(
+            data.as_ptr().cast(),
+            PCWSTR(key.as_ptr()),
+            &raw mut info,
+            &raw mut length,
+        )
+        .as_bool()
+            && !info.is_null()
+        {
+            let count = usize::try_from(length).unwrap_or_default() / 2;
+            let pairs = std::slice::from_raw_parts(info.cast::<u16>(), count);
+            let (pairs, _) = pairs.as_chunks::<2>();
+            translations.extend(
+                pairs
+                    .iter()
+                    .map(|&[language, code_page]| (language, code_page)),
+            );
+        }
+        translations.extend([(0x0409, 0x04b0), (0x0409, 0x04e4)]);
+        for (language, code_page) in translations {
+            let key = wide_text(&format!(
+                r"\StringFileInfo\{language:04x}{code_page:04x}\{name}"
+            ));
+            let mut value: *mut c_void = std::ptr::null_mut();
+            let mut characters = 0_u32;
+            if VerQueryValueW(
+                data.as_ptr().cast(),
+                PCWSTR(key.as_ptr()),
+                &raw mut value,
+                &raw mut characters,
+            )
+            .as_bool()
+                && !value.is_null()
+                && characters > 0
+            {
+                let text = std::slice::from_raw_parts(
+                    value.cast::<u16>(),
+                    usize::try_from(characters).unwrap_or_default(),
+                );
+                let end = text
+                    .iter()
+                    .position(|&unit| unit == 0)
+                    .unwrap_or(text.len());
+                return Ok(Some(
+                    String::from_utf16_lossy(&text[..end]).trim().to_owned(),
+                ));
+            }
+        }
+        Ok(None)
+    }
+}
+
 pub struct WindowsTrustVerifier;
 
 impl TrustVerifier for WindowsTrustVerifier {
     fn verify(&self, path: &Path, policy: TrustPolicy) -> Result<TrustReport, CoreError> {
         let strict = Self::verify_once(path, true)?;
-        let fallback = if policy == TrustPolicy::OfficialNvidiaCatalog
-            && revocation_unavailable(strict.status)
-        {
+        // When the revocation service is out of reach, a second pass without
+        // revocation tells an offline PC apart from a bad signature. Only the
+        // official-catalog policy can accept the file on that pass.
+        let fallback = if revocation_unavailable(strict.status) {
             Some(Self::verify_once(path, false)?)
         } else {
             None
@@ -564,11 +661,16 @@ fn resolve_trust(
         return strict.into_report(RevocationStatus::Verified, None);
     }
     let strict_status = strict.status;
-    if policy == TrustPolicy::OfficialNvidiaCatalog
-        && revocation_unavailable(strict_status)
+    if revocation_unavailable(strict_status)
         && let Some(fallback) = fallback
     {
-        if fallback.status == 0
+        if fallback.status != 0 {
+            return fallback.into_report(
+                RevocationStatus::NotVerified,
+                Some(native_failure(strict_status)),
+            );
+        }
+        if policy == TrustPolicy::OfficialNvidiaCatalog
             && fallback
                 .signer
                 .as_deref()
@@ -579,10 +681,14 @@ fn resolve_trust(
                 Some(native_failure(strict_status)),
             );
         }
-        return fallback.into_report(
-            RevocationStatus::NotVerified,
-            Some(native_failure(strict_status)),
-        );
+        // Everything but revocation checks out. That is still not trusted,
+        // but the user can fix it by going online.
+        return TrustReport {
+            signature: SignatureStatus::RevocationOffline,
+            signer: fallback.signer,
+            revocation: RevocationStatus::NotVerified,
+            native_failure: Some(native_failure(strict_status)),
+        };
     }
     strict.into_report(
         RevocationStatus::NotVerified,
@@ -709,42 +815,33 @@ impl AtomicFileReplacer for WindowsAtomicFileReplacer {
 pub struct WindowsPrivilegeBroker;
 
 impl PrivilegeBroker for WindowsPrivilegeBroker {
-    #[expect(
-        clippy::multiple_unsafe_ops_per_block,
-        reason = "the elevated process handle is created, waited on, and closed as one transaction"
-    )]
     fn run_elevated(&self, plan: &Path) -> Result<(), CoreError> {
         let executable = std::env::current_exe()?;
-        let executable = wide(&executable);
         let plan_hash = hex_hash(hash_file(plan)?);
-        let parameters = format!("--elevated-helper \"{}\" {plan_hash}", plan.display());
-        let parameters: Vec<u16> = parameters.encode_utf16().chain(Some(0)).collect();
-        let execute_size = u32::try_from(size_of::<SHELLEXECUTEINFOW>())
-            .map_err(|_| CoreError::Validation("shell structure is too large".into()))?;
-        let mut execute = SHELLEXECUTEINFOW {
-            cbSize: execute_size,
-            fMask: SEE_MASK_NOCLOSEPROCESS,
-            lpVerb: windows::core::w!("runas"),
-            lpFile: PCWSTR(executable.as_ptr()),
-            lpParameters: PCWSTR(parameters.as_ptr()),
-            nShow: SW_SHOWNORMAL.0,
-            ..Default::default()
-        };
-        // SAFETY: all strings are NUL-terminated and the returned process handle
-        // is retained until completion, then closed exactly once.
-        unsafe {
-            ShellExecuteExW(&raw mut execute).map_err(|error| shell_execute_error(&error))?;
-            if execute.hProcess.is_invalid() {
-                return Err(CoreError::Cancelled);
-            }
-            let wait = WaitForSingleObject(execute.hProcess, INFINITE);
-            let close = CloseHandle(execute.hProcess);
-            if wait == WAIT_FAILED {
-                return Err(CoreError::Validation("elevated helper wait failed".into()));
-            }
-            close.map_err(|error| windows_error(&error))?;
+        // The helper looks up this process's account to find its data folder.
+        let helper = app_elevation::Command::new(executable)
+            .arg("--elevated-helper")
+            .arg(plan)
+            .arg(plan_hash)
+            .arg(std::process::id().to_string())
+            .spawn()
+            .map_err(elevation_error)?;
+        let exit_code = helper.wait().map_err(elevation_error)?;
+        // A helper that could not find this account's data folder cannot
+        // write a result file there, so it reports through its exit code.
+        if exit_code == HELPER_EXIT_OTHER_ACCOUNT {
+            return Err(CoreError::Validation(OTHER_ACCOUNT_MESSAGE.into()));
         }
         Ok(())
+    }
+}
+
+/// Maps a failure to start or wait for the elevated helper, keeping a
+/// dismissed UAC prompt apart from a real failure.
+fn elevation_error(error: app_elevation::Error) -> CoreError {
+    match error {
+        app_elevation::Error::Cancelled => CoreError::Cancelled,
+        other => CoreError::Validation(format!("could not run the elevated helper: {other}")),
     }
 }
 
@@ -863,6 +960,8 @@ impl SystemToolProvider for NvidiaSystemTools {
         allow_stale: bool,
     ) -> Result<ToolChangeResult, CoreError> {
         ensure_indicator_id(&point.tool_id)?;
+        // The restore point comes from a plan the helper cannot trust.
+        validate_indicator_restore(&point.snapshot)?;
         let current = self.current_snapshot()?;
         if snapshot_hash(&current) != expected_current_hash
             || (!allow_stale && expected_current_hash != point.state_after_hash)
@@ -936,8 +1035,65 @@ pub fn snapshot_hash(snapshot: &RegistryValueSnapshot) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// The exit code of an elevated helper that runs as another account than the
+/// app that started it and could not find the app's data folder.
+pub const HELPER_EXIT_OTHER_ACCOUNT: u32 = 3;
+/// The exit code of an elevated helper that stopped before it could write a
+/// result file for any other reason.
+pub const HELPER_EXIT_FAILED: u32 = 2;
+
+const OTHER_ACCOUNT_MESSAGE: &str = "Windows ran the administrator step as another account, and \
+     DLSS Updater could not find your data folder from that account. Sign in to Windows with an \
+     administrator account, then try again.";
+
+/// Why the elevated helper stopped before it could write a result file.
+#[derive(Debug)]
+pub enum HelperFailure {
+    /// The helper runs as another account, and it could not find the data
+    /// folder of the account that started it.
+    OtherAccount,
+    Failed(CoreError),
+}
+
+impl HelperFailure {
+    #[must_use]
+    pub const fn exit_code(&self) -> u32 {
+        match self {
+            Self::OtherAccount => HELPER_EXIT_OTHER_ACCOUNT,
+            Self::Failed(_) => HELPER_EXIT_FAILED,
+        }
+    }
+}
+
+impl From<CoreError> for HelperFailure {
+    fn from(error: CoreError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<io::Error> for HelperFailure {
+    fn from(error: io::Error) -> Self {
+        Self::Failed(error.into())
+    }
+}
+
+impl std::fmt::Display for HelperFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OtherAccount => f.write_str(OTHER_ACCOUNT_MESSAGE),
+            Self::Failed(error) => error.fmt(f),
+        }
+    }
+}
+
 /// Elevated entry point. The caller supplies only a plan file; registry paths
 /// are resolved above from the allowlisted tool ID.
+///
+/// The data folder is the one of the account that runs `launcher_pid`, which
+/// must be this same executable. With over-the-shoulder elevation, a standard
+/// user approves the prompt with an administrator's password, and the helper
+/// runs as that administrator. Its own `%LOCALAPPDATA%` is then not the one
+/// the app wrote the plan to.
 ///
 /// # Errors
 /// Returns an error when helper paths, the serialized plan, independent plan
@@ -945,9 +1101,16 @@ pub fn snapshot_hash(snapshot: &RegistryValueSnapshot) -> [u8; 32] {
 pub fn run_elevated_helper(
     plan_path: &Path,
     expected_plan_hash: [u8; 32],
-) -> Result<(), CoreError> {
-    tracing::info!(plan = %plan_path.display(), "elevated helper started");
-    let local = WindowsKnownDirectories.local_app_data()?;
+    launcher_pid: u32,
+) -> Result<(), HelperFailure> {
+    tracing::info!(plan = %plan_path.display(), launcher_pid, "elevated helper started");
+    let (local, from_launcher) = match launcher_local_app_data(launcher_pid) {
+        Ok(local) => (local, true),
+        Err(error) => {
+            tracing::warn!(%error, "could not find the data folder of the account that started the helper");
+            (WindowsKnownDirectories.local_app_data()?, false)
+        }
+    };
     let base = local.join(crate::DATA_FOLDER);
     let plan_directory = base.join("helper-plans");
     let result_directory = base.join("helper-results");
@@ -956,15 +1119,17 @@ pub fn run_elevated_helper(
     let canonical_plan = plan_path.canonicalize()?;
     let canonical_plan_directory = plan_directory.canonicalize()?;
     if canonical_plan.parent() != Some(canonical_plan_directory.as_path()) {
+        if !from_launcher {
+            return Err(HelperFailure::OtherAccount);
+        }
         return Err(CoreError::Validation(
             "helper plan is outside the private plan directory".into(),
-        ));
+        )
+        .into());
     }
     let plan_bytes = fs::read(&canonical_plan)?;
     if <[u8; 32]>::from(Sha256::digest(&plan_bytes)) != expected_plan_hash {
-        return Err(CoreError::Validation(
-            "elevated helper plan digest mismatch".into(),
-        ));
+        return Err(CoreError::Validation("elevated helper plan digest mismatch".into()).into());
     }
     let plan: ElevatedHelperPlan = read_versioned_json_bytes(&plan_bytes, 1)?;
     let result = match plan {
@@ -1012,7 +1177,74 @@ pub fn run_elevated_helper(
         Ok(()) => tracing::info!("elevated helper completed"),
         Err(error) => tracing::error!(%error, "elevated helper failed"),
     }
-    result
+    Ok(result?)
+}
+
+/// The `%LOCALAPPDATA%` of the account that runs `pid`, which must be this
+/// same executable.
+///
+/// The process and its token are opened for query only. When Windows refuses
+/// either, the helper stops: it never widens its own rights to look.
+fn launcher_local_app_data(pid: u32) -> Result<PathBuf, CoreError> {
+    // SAFETY: `OpenProcess` takes no pointers; the handle it returns is owned
+    // from here on.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+        .map(owned)
+        .map_err(|error| windows_error(&error))?;
+    let image = process_image(&process)?;
+    let own = std::env::current_exe()?.canonicalize()?;
+    if image.canonicalize()? != own {
+        return Err(CoreError::Validation(
+            "the process that started the helper is not this app".into(),
+        ));
+    }
+    let mut token = HANDLE::default();
+    // SAFETY: `process` is a live handle, and `token` receives a handle that
+    // is owned from here on.
+    unsafe {
+        OpenProcessToken(
+            borrowed(&process),
+            TOKEN_QUERY | TOKEN_IMPERSONATE | TOKEN_DUPLICATE,
+            &raw mut token,
+        )
+    }
+    .map_err(|error| windows_error(&error))?;
+    let token = owned(token);
+    // SAFETY: the folder ID is a constant, and `token` is a live token handle
+    // opened with the query and impersonate rights the call requires.
+    let raw = unsafe {
+        SHGetKnownFolderPath(
+            &FOLDERID_LocalAppData,
+            KF_FLAG_DEFAULT,
+            Some(borrowed(&token)),
+        )
+    }
+    .map_err(|error| windows_error(&error))?;
+    // SAFETY: a successful call returns a NUL-terminated string that this
+    // function owns until it is freed below.
+    let path = OsString::from_wide(unsafe { raw.as_wide() });
+    // SAFETY: the string was copied above and is freed exactly once.
+    unsafe { CoTaskMemFree(Some(raw.0.cast_const().cast())) };
+    tracing::info!(path = %Path::new(&path).display(), "using the data folder of the account that started the helper");
+    Ok(PathBuf::from(path))
+}
+
+fn process_image(process: &OwnedHandle) -> Result<PathBuf, CoreError> {
+    let mut buffer = vec![0_u16; 32_768];
+    let mut length = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+    // SAFETY: `buffer` holds `length` units and outlives the call, which
+    // writes the path's length back to `length`.
+    unsafe {
+        QueryFullProcessImageNameW(
+            borrowed(process),
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &raw mut length,
+        )
+    }
+    .map_err(|error| windows_error(&error))?;
+    buffer.truncate(usize::try_from(length).unwrap_or_default());
+    Ok(PathBuf::from(OsString::from_wide(&buffer)))
 }
 
 fn validate_helper_paths(
@@ -1058,7 +1290,9 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
     let discovered_game = WindowsGameLocator.locate().0.into_iter().find(|game| {
         game.id == plan.game_id && game.root.canonicalize().ok() == Some(game_root.clone())
     });
-    let manual_game = (plan.game_id.0.starts_with("manual:"))
+    // A manual game must be a folder the user added in the app, not any
+    // folder a plan names.
+    let manual_game = (plan.game_id.0.starts_with("manual:") && is_custom_root(base, &game_root)?)
         .then(|| crate::manual_install(&game_root))
         .transpose()?
         .filter(|game| game.id == plan.game_id);
@@ -1073,13 +1307,7 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
     let installations = crate::managed_dll_entries(&plan.game_id, &game_root)
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
-    // A root that does not exist yet, such as the release cache before the
-    // first download, allows no sources but does not block the others.
-    let releases = base.join("cache/releases").canonicalize().ok();
-    let backups = base.join("backups/objects");
-    let backups = backups.canonicalize().ok();
-    let imports = base.join("imports/objects");
-    let imports = imports.canonicalize().ok();
+    let stores = HelperStores::resolve(base);
     // Owns every staged copy from the moment it exists: an item that fails
     // validation further down returns early, and dropping this removes the
     // copies staged for the items before it.
@@ -1123,31 +1351,20 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
             ));
         }
         let source = swap.source_path.canonicalize()?;
-        let imported_source = imports
-            .as_ref()
-            .is_some_and(|root| source.starts_with(root));
-        let backup_source = backups
-            .as_ref()
-            .is_some_and(|root| source.starts_with(root));
-        let release_source = releases
-            .as_ref()
-            .is_some_and(|root| source.starts_with(root));
-        if (!release_source && !backup_source && !imported_source)
-            || hash_file(&source)? != swap.source_sha256
-        {
+        let kind = identify_helper_source(&stores, &source, swap.source_sha256, &target)?;
+        if hash_file(&source)? != swap.source_sha256 {
             return Err(CoreError::Validation(
-                "source is outside the validated cache".into(),
+                "source does not match its recorded hash".into(),
             ));
         }
-        let policy = staged_source_policy(release_source, backup_source);
-        validate_nvidia_dll(&source, policy)?;
+        validate_helper_source(&source, kind, &target)?;
         let staged = stage_elevated_source(
             &source,
             &target,
             swap.source_sha256,
             &plan.nonce,
             index,
-            policy,
+            kind,
         )?;
         staged_plan.sources.push(staged.clone());
         let mut staged_swap: PlannedSwap = swap.clone();
@@ -1158,11 +1375,36 @@ fn validate_file_plan(plan: &ElevatedFilePlan, base: &Path) -> Result<StagedFile
     Ok(staged_plan)
 }
 
-fn staged_source_policy(release_source: bool, backup_source: bool) -> TrustPolicy {
-    if release_source || backup_source {
-        TrustPolicy::OfficialNvidiaCatalog
-    } else {
-        TrustPolicy::Strict
+/// Checks a source's contents the way its store requires.
+///
+/// - A release DLL needs an NVIDIA signature, and may use the offline
+///   revocation fallback the release cache uses.
+/// - An import needs an NVIDIA signature with a completed revocation check,
+///   and an `OriginalFilename` that is the target's name.
+/// - A backup is what the game had, which need not be signed by NVIDIA. It is
+///   checked as an x86-64 DLL only, because `identify_helper_source` allows
+///   it only at its own original path.
+fn validate_helper_source(path: &Path, kind: HelperSource, target: &Path) -> Result<(), CoreError> {
+    match kind {
+        HelperSource::Release => validate_nvidia_dll(path, TrustPolicy::OfficialNvidiaCatalog),
+        HelperSource::Import => {
+            validate_nvidia_dll(path, TrustPolicy::Strict)?;
+            check_original_file_name(
+                &WindowsDllInspector,
+                path,
+                target.file_name().unwrap_or_default(),
+            )
+        }
+        HelperSource::Backup => {
+            if !WindowsDllInspector.inspect_structure(path)?.x86_64 {
+                return Err(CoreError::Validation("backup is not an x86-64 DLL".into()));
+            }
+            let trust = WindowsTrustVerifier.verify(path, TrustPolicy::OfficialNvidiaCatalog);
+            if let Some(problem) = trust.as_ref().ok().and_then(nvidia_trust_problem) {
+                tracing::warn!(path = %path.display(), problem, "restoring a backup that is not signed by NVIDIA to its original path");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1171,18 +1413,16 @@ fn validate_nvidia_dll(path: &Path, policy: TrustPolicy) -> Result<(), CoreError
     // policy-aware verification on the next line, not the strict-policy one an
     // `inspect` would additionally compute and discard.
     let metadata = WindowsDllInspector.inspect_structure(path)?;
-    let trust = WindowsTrustVerifier.verify(path, policy)?;
-    if !metadata.x86_64
-        || metadata.version.is_none()
-        || trust.signature != SignatureStatus::Trusted
-        || !trust
-            .signer
-            .as_deref()
-            .is_some_and(dlss_core::is_nvidia_signer)
-    {
+    if !metadata.x86_64 || metadata.version.is_none() {
         return Err(CoreError::Validation(
-            "source failed elevated NVIDIA trust validation".into(),
+            "source is not an x86-64 DLL with a version resource".into(),
         ));
+    }
+    let trust = WindowsTrustVerifier.verify(path, policy)?;
+    if let Some(problem) = nvidia_trust_problem(&trust) {
+        return Err(CoreError::Validation(format!(
+            "source failed elevated NVIDIA trust validation: {problem}"
+        )));
     }
     Ok(())
 }
@@ -1193,7 +1433,7 @@ fn stage_elevated_source(
     expected_hash: [u8; 32],
     nonce: &str,
     index: usize,
-    policy: TrustPolicy,
+    kind: HelperSource,
 ) -> Result<PathBuf, CoreError> {
     let parent = target
         .parent()
@@ -1214,7 +1454,7 @@ fn stage_elevated_source(
                 "elevated source staging hash mismatch".into(),
             ));
         }
-        validate_nvidia_dll(&staged, policy)
+        validate_helper_source(&staged, kind, target)
     })();
     if let Err(error) = result {
         let _ = fs::remove_file(&staged);
@@ -1304,7 +1544,32 @@ mod tests {
             native(offline, None),
             Some(native(0, Some("NVIDIA Corporation"))),
         );
-        assert_eq!(strict.signature, SignatureStatus::Untrusted);
+        assert_eq!(strict.signature, SignatureStatus::RevocationOffline);
+        assert_eq!(strict.revocation, RevocationStatus::NotVerified);
+    }
+
+    #[test]
+    fn offline_is_reported_only_when_the_rest_of_the_signature_checks_out() {
+        let offline = CRYPT_E_REVOCATION_OFFLINE.0;
+        let bad_digest = 0x8009_6010_u32.cast_signed();
+        for policy in [TrustPolicy::Strict, TrustPolicy::OfficialNvidiaCatalog] {
+            let broken = resolve_trust(
+                policy,
+                native(offline, None),
+                Some(native(bad_digest, Some("NVIDIA Corporation"))),
+            );
+            assert_eq!(broken.signature, SignatureStatus::Untrusted);
+            let other_publisher = resolve_trust(
+                policy,
+                native(offline, None),
+                Some(native(0, Some("Example Publisher"))),
+            );
+            assert_eq!(
+                other_publisher.signature,
+                SignatureStatus::RevocationOffline
+            );
+            assert!(nvidia_trust_problem(&other_publisher).is_some());
+        }
     }
 
     #[test]
@@ -1324,15 +1589,6 @@ mod tests {
             assert_eq!(report.revocation, RevocationStatus::NotVerified);
             assert_eq!(report.native_failure.unwrap().status, status);
         }
-    }
-
-    #[test]
-    fn elevated_backups_use_offline_nvidia_fallback_but_imports_stay_strict() {
-        assert_eq!(
-            staged_source_policy(false, true),
-            TrustPolicy::OfficialNvidiaCatalog
-        );
-        assert_eq!(staged_source_policy(false, false), TrustPolicy::Strict);
     }
 
     #[test]

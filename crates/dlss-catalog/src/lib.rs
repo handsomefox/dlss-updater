@@ -28,23 +28,12 @@ enum CandidateTrust {
 // picked by the old rule, and GitHub answers a request carrying that ETag with
 // 304, which would keep the wrong URLs in place until NVIDIA publishes again.
 pub const CATALOG_SCHEMA_VERSION: u32 = 2;
-pub const PREPARED_RELEASE_SCHEMA_VERSION: u32 = 1;
-const PREPARED_MANIFEST: &str = "manifest.json";
-
-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct PreparedReleaseEntry {
-    pub file_name: String,
-    pub version: dlss_core::DllVersion,
-    pub sha256: [u8; 32],
-    pub source: PathBuf,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
-pub struct PreparedReleaseManifest {
-    pub release: ReleaseId,
-    pub validation: ReleaseValidation,
-    pub dlls: Vec<PreparedReleaseEntry>,
-}
+// The elevated helper reads the prepared manifest too, so its types live in
+// `dlss-core`, which the helper's crate depends on.
+pub use dlss_core::{
+    PREPARED_MANIFEST, PREPARED_RELEASE_SCHEMA_VERSION, PreparedReleaseEntry,
+    PreparedReleaseManifest,
+};
 
 /// Loads a prepared release only when its versioned manifest and every DLL hash agree.
 ///

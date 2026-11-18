@@ -256,6 +256,11 @@ impl BackupStore {
         // re-inspect the entire backup history, which grows with every
         // operation. Readers validate each record before offering it for
         // restore, so an entry that later goes bad is still never usable.
+        //
+        // The app and the elevated helper, or two app windows, can commit at
+        // the same time. The lock keeps one from writing an index read before
+        // the other's record landed, which would drop that record.
+        let _lock = lock_store(&self.root)?;
         let mut index = self.load_index()?;
         if let Some(existing) = index.records.iter_mut().find(|existing| {
             existing.sha256 == record.sha256
@@ -306,8 +311,14 @@ impl BackupStore {
         Ok(report)
     }
 
-    /// Loads usable backups that retain a valid NVIDIA signature in addition
-    /// to their content and PE metadata, reporting rejected entries separately.
+    /// Loads usable backups and records which of them lack a valid NVIDIA
+    /// signature, reporting rejected entries separately.
+    ///
+    /// A backup is the file the game had before a swap, which is not always an
+    /// NVIDIA-signed DLL. One whose content and PE metadata still match its
+    /// record stays usable, because a restore can put it back only at its own
+    /// `original_path`. Its hash goes into `not_nvidia_signed`, so the app can
+    /// warn before restoring it.
     ///
     /// # Errors
     /// Returns an error only when the index itself cannot be read or decoded.
@@ -332,14 +343,13 @@ impl BackupStore {
                     }
                     report.usable.push(record);
                 }
-                Ok(_) => report.rejected.push(RejectedBackup {
-                    record,
-                    reason: "backup object failed NVIDIA trust validation".into(),
-                }),
-                Err(error) => report.rejected.push(RejectedBackup {
-                    record,
-                    reason: error.to_string(),
-                }),
+                // Trust could not be established, either because the file is
+                // not signed by NVIDIA or because the check itself failed.
+                // Neither changes which bytes the record holds.
+                Ok(_) | Err(_) => {
+                    report.not_nvidia_signed.insert(record.sha256);
+                    report.usable.push(record);
+                }
             }
         }
         Ok(report)
@@ -384,22 +394,51 @@ pub fn execute_plan(
         .iter()
         .map(|swap| {
             let outcome = execute_swap(swap, inspector, replacer, backups, timestamp_unix);
-            let (result, backup, denied) = match outcome {
-                Ok((metadata, backup)) => (Ok(metadata), Some(backup), false),
-                Err(error) => {
-                    let denied = error.is_permission_denied();
-                    (Err(error.to_string()), None, denied)
-                }
-            };
-            SwapResult {
-                installation: swap.installation.clone(),
-                result,
-                backup,
-                denied,
+            match outcome {
+                Ok((metadata, backup)) => SwapResult {
+                    installation: swap.installation.clone(),
+                    result: Ok(metadata),
+                    backup: Some(backup),
+                    denied: false,
+                    unconfirmed: false,
+                },
+                Err(SwapFailure::Unconfirmed { backup, error }) => SwapResult {
+                    installation: swap.installation.clone(),
+                    result: Err(error.to_string()),
+                    backup: Some(*backup),
+                    denied: false,
+                    unconfirmed: true,
+                },
+                Err(SwapFailure::Failed(error)) => SwapResult {
+                    installation: swap.installation.clone(),
+                    result: Err(error.to_string()),
+                    backup: None,
+                    denied: error.is_permission_denied(),
+                    unconfirmed: false,
+                },
             }
         })
         .collect();
     BatchResult { swaps }
+}
+
+/// Why one swap did not finish with a confirmed result.
+#[derive(Debug)]
+enum SwapFailure {
+    /// Nothing was replaced, or the target changed again right after it was.
+    Failed(CoreError),
+    /// The replacement succeeded, but reading the DLL back failed. The file
+    /// most likely holds the new DLL, so the backup still allows an undo.
+    Unconfirmed {
+        backup: Box<BackupRecord>,
+        error: CoreError,
+    },
+}
+
+impl From<CoreError> for SwapFailure {
+    fn from(error: CoreError) -> Self {
+        Self::Failed(error)
+    }
 }
 
 fn execute_swap(
@@ -408,13 +447,13 @@ fn execute_swap(
     replacer: &dyn AtomicFileReplacer,
     backups: &BackupStore,
     timestamp_unix: i64,
-) -> Result<(crate::DllStructure, BackupRecord), CoreError> {
+) -> Result<(crate::DllStructure, BackupRecord), SwapFailure> {
     let current = inspector.inspect_structure(&swap.target_path)?;
     if current.sha256 != swap.expected_sha256 {
-        return Err(CoreError::StalePlan);
+        return Err(CoreError::StalePlan.into());
     }
     if hash_file(&swap.source_path)? != swap.source_sha256 {
-        return Err(CoreError::Validation("cached source hash changed".into()));
+        return Err(CoreError::Validation("cached source hash changed".into()).into());
     }
     let backup = backups.commit(
         &swap.target_path,
@@ -428,7 +467,15 @@ fn execute_swap(
         &swap.source_path,
         swap.source_sha256,
     )?;
-    let installed = inspector.inspect_structure(&swap.target_path)?;
+    let installed = match inspector.inspect_structure(&swap.target_path) {
+        Ok(installed) => installed,
+        Err(error) => {
+            return Err(SwapFailure::Unconfirmed {
+                backup: Box::new(backup),
+                error,
+            });
+        }
+    };
     if installed.sha256 != swap.source_sha256 {
         // Something, such as a launcher repairing its files, wrote another
         // DLL right after the swap. Putting the backup over it would destroy
@@ -438,9 +485,28 @@ fn execute_swap(
             "the DLL changed again right after it was replaced, so it was left as it is; \
              its backup is in the restore history"
                 .into(),
-        ));
+        )
+        .into());
     }
     Ok((installed, backup))
+}
+
+/// Opens `index.lock` in a store's root and holds it exclusively until the
+/// returned file is dropped.
+///
+/// Every load-edit-save of a store's `index.json` holds this lock, so two
+/// processes cannot each write an index that lacks the other's change. The
+/// lock is a separate file because `index.json` is replaced by a rename on
+/// every save.
+pub(crate) fn lock_store(root: &Path) -> Result<File, CoreError> {
+    fs::create_dir_all(root)?;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(root.join("index.lock"))?;
+    file.lock()?;
+    Ok(file)
 }
 
 /// Computes a file's SHA-256 digest.
@@ -821,7 +887,7 @@ mod tests {
                 == Some(crate::DllKind::Streamline)
         }));
         let streamline_only = plan_dlss_only_upgrades("n", &installed[2..], &latest[2..]);
-        assert!(streamline_only.swaps.is_empty());
+        assert_eq!(streamline_only.swaps, Vec::<PlannedSwap>::new());
     }
 
     /// A DLSS 1 game with a Super Resolution and a Frame Generation DLL, both
@@ -1178,7 +1244,11 @@ mod tests {
             &backups,
             2,
         );
-        assert!(result.unwrap_err().to_string().contains("backup object"));
+        assert!(
+            matches!(&result, Err(SwapFailure::Failed(error))
+                if error.to_string().contains("backup object")),
+            "{result:?}"
+        );
         assert_eq!(fs::read(target).unwrap(), b"original");
     }
 
@@ -1405,12 +1475,12 @@ mod tests {
     }
 
     #[test]
-    fn backup_reuse_requires_a_trusted_nvidia_signer() {
+    fn a_backup_without_an_nvidia_signature_is_usable_but_flagged() {
         let dir = tempdir().unwrap();
         let original = dir.path().join("nvngx_dlss.dll");
         fs::write(&original, b"signed bytes").unwrap();
         let backups = BackupStore::new(dir.path().join("backups"));
-        backups
+        let record = backups
             .commit(&original, hash_file(&original).unwrap(), &BytesInspector, 1)
             .unwrap();
 
@@ -1418,17 +1488,145 @@ mod tests {
             .load_trusted_report(&BytesInspector, &Signer("NVIDIA Corporation"))
             .unwrap();
         assert_eq!(trusted.usable.len(), 1);
-        assert!(trusted.rejected.is_empty());
+        assert_eq!(trusted.rejected, Vec::new());
+        assert_eq!(trusted.not_nvidia_signed.len(), 0);
 
         let untrusted = backups
             .load_trusted_report(&BytesInspector, &Signer("Example Publisher"))
             .unwrap();
-        assert!(untrusted.usable.is_empty());
-        assert_eq!(untrusted.rejected.len(), 1);
+        assert_eq!(untrusted.usable, std::slice::from_ref(&record));
+        assert_eq!(untrusted.rejected, Vec::new());
+        assert!(untrusted.not_nvidia_signed.contains(&record.sha256));
     }
 
     #[test]
-    fn backup_report_keeps_valid_and_offline_nvidia_records() {
+    fn a_backup_restores_only_to_its_original_path() {
+        let dir = tempdir().unwrap();
+        let original = dir.path().join("a").join("nvngx_dlss.dll");
+        let other = dir.path().join("b").join("nvngx_dlss.dll");
+        for path in [&original, &other] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"current").unwrap();
+        }
+        let content = dir.path().join("backup.bin");
+        fs::write(&content, b"not signed by NVIDIA").unwrap();
+        let backup = BackupRecord {
+            sha256: hash_file(&content).unwrap(),
+            content_path: content,
+            original_path: original.clone(),
+            version: None,
+            created_unix: 1,
+        };
+        let restore = |path: &Path| {
+            let installed = installation(path.to_path_buf(), None);
+            let profile = TargetProfile {
+                targets: [(
+                    installed.id.clone(),
+                    DesiredDll::Restore {
+                        backup_sha256: backup.sha256,
+                    },
+                )]
+                .into(),
+            };
+            plan_target_profile(
+                "n",
+                &[installed],
+                &[],
+                &[],
+                std::slice::from_ref(&backup),
+                &profile,
+            )
+        };
+        assert_eq!(restore(&original).unwrap().swaps.len(), 1);
+        assert!(matches!(restore(&other), Err(CoreError::Validation(_))));
+    }
+
+    #[test]
+    fn concurrent_commits_keep_every_record() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("backups");
+        std::thread::scope(|scope| {
+            for index in 0..8_u8 {
+                let root = &root;
+                let original = dir
+                    .path()
+                    .join(format!("game-{index}"))
+                    .join("nvngx_dlss.dll");
+                scope.spawn(move || {
+                    fs::create_dir_all(original.parent().unwrap()).unwrap();
+                    fs::write(&original, [index; 16]).unwrap();
+                    // Each thread has its own store value, as two processes would.
+                    BackupStore::new(root)
+                        .commit(&original, hash_file(&original).unwrap(), &BytesInspector, 1)
+                        .unwrap();
+                });
+            }
+        });
+        assert_eq!(
+            BackupStore::new(&root).load_index().unwrap().records.len(),
+            8
+        );
+    }
+
+    /// Fails every structural inspection after the first `allowed` ones, the
+    /// way a DLL a launcher locks right after the swap would.
+    struct FailAfter {
+        allowed: Mutex<usize>,
+    }
+    impl DllInspector for FailAfter {
+        fn inspect(&self, path: &Path) -> Result<DllMetadata, CoreError> {
+            let mut allowed = self.allowed.lock().unwrap();
+            if *allowed == 0 {
+                return Err(std::io::Error::other("the file is locked").into());
+            }
+            *allowed -= 1;
+            BytesInspector.inspect(path)
+        }
+    }
+
+    #[test]
+    fn a_swap_that_cannot_be_read_back_keeps_its_backup() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target.dll");
+        let source = dir.path().join("source.dll");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&source, b"new").unwrap();
+        let plan = OperationPlan {
+            nonce: "n".into(),
+            swaps: vec![PlannedSwap {
+                game: GameId("g".into()),
+                installation: DllInstallationId("d".into()),
+                target_path: target.clone(),
+                expected_sha256: hash_file(&target).unwrap(),
+                source_path: source.clone(),
+                source_sha256: hash_file(&source).unwrap(),
+                comparison: Comparison::Upgrade,
+            }],
+        };
+        // The plan check and the backup inspect the target; the read-back fails.
+        let inspector = FailAfter {
+            allowed: Mutex::new(2),
+        };
+        let result = execute_plan(
+            &plan,
+            &inspector,
+            &CopyReplacer {
+                fail: Mutex::new(Vec::new()),
+            },
+            &BackupStore::new(dir.path().join("backups")),
+            0,
+        );
+        let swap = &result.swaps[0];
+        assert!(swap.unconfirmed);
+        assert!(!swap.denied);
+        assert!(swap.result.as_ref().unwrap_err().contains("locked"));
+        let backup = swap.backup.as_ref().unwrap();
+        assert_eq!(fs::read(&backup.content_path).unwrap(), b"old");
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+    }
+
+    #[test]
+    fn backup_report_keeps_valid_offline_and_flagged_records() {
         let dir = tempdir().unwrap();
         let backups = BackupStore::new(dir.path().join("backups"));
         for (name, bytes) in [
@@ -1462,10 +1660,23 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             usable_names,
-            [OsStr::new("valid.dll"), OsStr::new("offline.dll")]
+            [
+                OsStr::new("valid.dll"),
+                OsStr::new("wrong.dll"),
+                OsStr::new("offline.dll")
+            ]
         );
-        assert_eq!(report.rejected.len(), 2);
+        assert_eq!(report.rejected.len(), 1);
         assert_eq!(report.offline_revocation_fallbacks, 1);
+        let wrong = report
+            .usable
+            .iter()
+            .find(|record| record.original_path.ends_with("wrong.dll"))
+            .unwrap();
+        assert_eq!(
+            report.not_nvidia_signed,
+            std::collections::BTreeSet::from([wrong.sha256])
+        );
     }
 
     #[test]

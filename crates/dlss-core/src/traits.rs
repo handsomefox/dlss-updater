@@ -74,6 +74,16 @@ pub trait DllInspector: Send + Sync {
     fn inspect_structure(&self, path: &Path) -> Result<DllStructure, CoreError> {
         Ok(self.inspect(path)?.structure())
     }
+    /// Reads the `OriginalFilename` string from the DLL's version resource.
+    ///
+    /// The default reports none, so a caller that requires the name refuses
+    /// the file on an inspector that cannot read it.
+    ///
+    /// # Errors
+    /// Returns an error when the file cannot be read.
+    fn original_file_name(&self, _path: &Path) -> Result<Option<String>, CoreError> {
+        Ok(None)
+    }
 }
 pub trait TrustVerifier: Send + Sync {
     /// Verifies the platform signature policy for a DLL.

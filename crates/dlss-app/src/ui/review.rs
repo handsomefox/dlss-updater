@@ -31,6 +31,8 @@ pub(crate) struct ReviewRow {
     comparison: dlss_core::Comparison,
     checked: bool,
     known_risk: Option<&'static str>,
+    /// Restores a backup that is not signed by NVIDIA.
+    unsigned_restore: bool,
 }
 
 impl ReviewRow {
@@ -115,6 +117,7 @@ impl DlssApp {
                             comparison: swap.comparison,
                             checked: true,
                             known_risk: game.known_risk,
+                            unsigned_restore: false,
                         });
                     }
                 }
@@ -152,6 +155,7 @@ impl DlssApp {
                                     file_name: installed.file_name.clone(),
                                     installed: installed.metadata.version,
                                     target: self.version_for_sha(swap.source_sha256),
+                                    unsigned_restore: self.restores_unsigned(&desired),
                                     desired,
                                     comparison: swap.comparison,
                                     checked: true,
@@ -172,6 +176,12 @@ impl DlssApp {
                 (rows, errors, true)
             }
         }
+    }
+
+    /// Whether `desired` restores a backup that is not signed by NVIDIA.
+    fn restores_unsigned(&self, desired: &dlss_core::DesiredDll) -> bool {
+        matches!(desired, dlss_core::DesiredDll::Restore { backup_sha256 }
+            if self.unsigned_backups.contains(backup_sha256))
     }
 
     /// Version of a known source (release, import, or backup) by content hash.
@@ -355,6 +365,22 @@ fn review_warnings(ui: &mut egui::Ui, review: &ReviewState) {
             icons::WARNING,
             "Replacing Streamline can make a game run worse or crash. Leave it unchecked \
              unless you are fixing a specific problem.",
+            false,
+        );
+    }
+    if review
+        .rows
+        .iter()
+        .any(|row| row.checked && row.unsigned_restore)
+    {
+        ui.add_space(4.0);
+        widgets::banner(
+            ui,
+            theme::WARNING,
+            icons::SHIELD_WARNING,
+            "A backup you are restoring is not signed by NVIDIA. It is the file the game had \
+             before DLSS Updater replaced it, and it can go back only to the place it came from. \
+             Restore it only if you trust where the game got that file.",
             false,
         );
     }
@@ -735,6 +761,7 @@ mod tests {
             comparison: dlss_core::Comparison::Unknown,
             checked,
             known_risk: risk,
+            unsigned_restore: false,
         }
     }
 
@@ -777,7 +804,7 @@ mod tests {
             risk_row("c", None, true),
         ];
         assert_eq!(group_by_game(&rows), [0..2, 2..3, 3..5]);
-        assert!(group_by_game(&[]).is_empty());
+        assert_eq!(group_by_game(&[]), Vec::<std::ops::Range<usize>>::new());
     }
 
     #[test]

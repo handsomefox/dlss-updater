@@ -120,14 +120,23 @@ fn elevated_helper() {
             tracing::error!("missing or invalid elevated helper plan digest");
             std::process::exit(2);
         };
-        if let Err(error) =
-            dlss_platform::windows::run_elevated_helper(std::path::Path::new(&plan), plan_hash)
-        {
+        let Some(launcher_pid) = arguments
+            .next()
+            .and_then(|value| value.to_str().and_then(|text| text.parse::<u32>().ok()))
+        else {
+            tracing::error!("missing or invalid elevated helper launcher process ID");
+            std::process::exit(2);
+        };
+        if let Err(error) = dlss_platform::windows::run_elevated_helper(
+            std::path::Path::new(&plan),
+            plan_hash,
+            launcher_pid,
+        ) {
             // The plan could not be validated far enough to write a result file,
             // so signal failure through the exit code. When the plan did parse,
             // the outcome (including errors) is written to the result file above.
             tracing::error!(%error, "elevated helper rejected the plan");
-            std::process::exit(2);
+            std::process::exit(i32::try_from(error.exit_code()).unwrap_or(2));
         }
     }
     #[cfg(not(windows))]
@@ -160,6 +169,9 @@ struct DlssApp {
     release_download: Option<ReleaseDownload>,
     imports: Vec<dlss_core::ImportedDllRecord>,
     backups: Vec<dlss_core::BackupRecord>,
+    /// Hashes of the usable backups that are not signed by NVIDIA. Restoring
+    /// one shows a warning first.
+    unsigned_backups: std::collections::BTreeSet<[u8; 32]>,
     backup_warning: Option<String>,
     backups_loading: bool,
     toast: Option<Toast>,
@@ -410,6 +422,7 @@ impl DlssApp {
             release_download: None,
             imports: Vec::new(),
             backups: Vec::new(),
+            unsigned_backups: std::collections::BTreeSet::new(),
             backup_warning: None,
             backups_loading: true,
             toast: None,
@@ -505,9 +518,11 @@ impl DlssApp {
             Ok(report) => {
                 self.backup_warning = backup_warning_message(&report);
                 self.backups = report.usable;
+                self.unsigned_backups = report.not_nvidia_signed;
             }
             Err(error) => {
                 self.backups.clear();
+                self.unsigned_backups.clear();
                 self.backup_warning = Some(format!("Could not load backup history: {error}"));
             }
         }
@@ -1022,14 +1037,25 @@ impl DlssApp {
                     {
                         actions.push(Action::ChangeIndicator { restore: false });
                     }
+                    // A saved value the helper would refuse is caught here,
+                    // before a UAC prompt rather than after it.
+                    let restorable = self.persisted.tool_restore_points.last().map(|point| {
+                        dlss_core::validate_indicator_restore(&point.snapshot).is_ok()
+                    });
                     #[cfg(windows)]
-                    let can_restore = !self.persisted.tool_restore_points.is_empty();
+                    let can_restore = restorable == Some(true);
                     #[cfg(not(windows))]
                     let can_restore = false;
+                    let disabled_reason = if restorable == Some(false) {
+                        "The setting from before the last change is not one DLSS Updater sets, so \
+                         it cannot be put back here"
+                    } else {
+                        "The app has not changed this setting yet"
+                    };
                     if ui
                         .add_enabled(can_restore, egui::Button::new("Restore previous"))
                         .on_hover_text("Put back the setting from before the last change")
-                        .on_disabled_hover_text("The app has not changed this setting yet")
+                        .on_disabled_hover_text(disabled_reason)
                         .clicked()
                     {
                         actions.push(Action::ChangeIndicator { restore: true });
@@ -1451,8 +1477,7 @@ impl DlssApp {
             .games
             .iter()
             .find(|game| &game.id == game_id)
-            .map(|game| game.details.iter().map(|dll| dll.id.clone()).collect())
-            .unwrap_or_default();
+            .map_or_default(|game| game.details.iter().map(|dll| dll.id.clone()).collect());
         self.persisted
             .target_profile
             .targets
@@ -1545,8 +1570,7 @@ impl DlssApp {
 
     fn latest_catalog(&self) -> Vec<dlss_core::CatalogDll> {
         self.latest_release()
-            .map(|release| release.dlls.clone())
-            .unwrap_or_default()
+            .map_or_default(|release| release.dlls.clone())
     }
 
     fn preview_profile(

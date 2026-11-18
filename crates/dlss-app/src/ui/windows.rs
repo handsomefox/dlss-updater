@@ -31,8 +31,7 @@ fn format_local(timestamp: i64, format: &str) -> String {
 pub(crate) fn progress_label(state: ReleaseState, received: u64, total: Option<u64>) -> String {
     let amount = total
         .filter(|total| *total > 0)
-        .map(|total| format!(" {}%", received.saturating_mul(100) / total))
-        .unwrap_or_default();
+        .map_or_default(|total| format!(" {}%", received.saturating_mul(100) / total));
     match state {
         ReleaseState::Downloading => format!("Downloading the official release…{amount}"),
         ReleaseState::Downloaded => "Download complete".into(),

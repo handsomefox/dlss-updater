@@ -17,6 +17,9 @@ const RELEASES_URL: &str =
     "https://api.github.com/repos/NVIDIA-RTX/Streamline/releases?per_page=100";
 const OFFICIAL_DOWNLOAD_PREFIX: &str =
     "https://github.com/NVIDIA-RTX/Streamline/releases/download/";
+/// How long a connection may wait: for a connection, for an API response, or
+/// for the next bytes of a download.
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct OfficialAsset {
@@ -49,6 +52,8 @@ pub enum GithubError {
     DigestMismatch,
     #[error("download size mismatch: expected {expected} bytes, received {actual} bytes")]
     SizeMismatch { expected: u64, actual: u64 },
+    #[error("download stopped after {received} bytes: {reason}")]
+    Interrupted { received: u64, reason: String },
     #[error("GitHub listed {asset} in {release} with a malformed SHA-256 digest: {digest}")]
     InvalidDigest {
         release: String,
@@ -65,6 +70,7 @@ pub struct GithubCatalogClient {
     client: Client,
     releases_url: String,
     enforce_official_downloads: bool,
+    timeout: Duration,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,28 +85,38 @@ impl GithubCatalogClient {
     /// # Errors
     /// Returns an error when the HTTP client cannot be constructed.
     pub fn new() -> Result<Self, GithubError> {
+        Self::with_timeout(NETWORK_TIMEOUT)
+    }
+
+    fn with_timeout(timeout: Duration) -> Result<Self, GithubError> {
         // `reqwest/rustls-no-provider` leaves provider selection to the
         // application. Installing ring is idempotent; an error only means a
         // provider was already installed by another client in this process.
         let _ = rustls::crypto::ring::default_provider().install_default();
         Ok(Self {
-            // Release archives are hundreds of megabytes. The blocking client's
-            // The default 30s timeout covers the whole body read and would abort
-            // large downloads. Use a finite release-sized deadline so a connected
-            // peer still cannot stall the worker forever; the streaming size cap in
-            // `download` remains the total-size safety limit.
+            // The blocking client applies this timeout to each wait on its own:
+            // once for the response headers, then to every read of the body.
+            // A download that keeps receiving data can take as long as it
+            // needs, and one that stops sending fails after `timeout`. API
+            // requests also get a total deadline in `refresh`.
             client: Client::builder()
-                .timeout(Duration::from_mins(30))
-                .connect_timeout(Duration::from_secs(30))
+                .timeout(timeout)
+                .connect_timeout(timeout)
                 .build()?,
             releases_url: RELEASES_URL.into(),
             enforce_official_downloads: true,
+            timeout,
         })
     }
 
     #[cfg(test)]
     fn with_releases_url(releases_url: String) -> Result<Self, GithubError> {
-        let mut client = Self::new()?;
+        Self::for_test(releases_url, NETWORK_TIMEOUT)
+    }
+
+    #[cfg(test)]
+    fn for_test(releases_url: String, timeout: Duration) -> Result<Self, GithubError> {
+        let mut client = Self::with_timeout(timeout)?;
         client.releases_url = releases_url;
         client.enforce_official_downloads = false;
         Ok(client)
@@ -121,7 +137,13 @@ impl GithubCatalogClient {
             if page > 20 {
                 return Err(GithubError::TooManyPages);
             }
-            let mut request = self.client.get(&current).header(USER_AGENT, "dlss-updater");
+            // A total deadline: a release page is small, so a response that
+            // takes longer than this is stuck, not slow.
+            let mut request = self
+                .client
+                .get(&current)
+                .header(USER_AGENT, "dlss-updater")
+                .timeout(self.timeout);
             if page == 1
                 && let Some(previous_etag) = previous_etag
             {
@@ -209,13 +231,12 @@ impl GithubCatalogClient {
             loop {
                 let read = match response.read(&mut buffer) {
                     Ok(read) => read,
-                    Err(_error) if total.is_some() => {
-                        return Err(GithubError::SizeMismatch {
-                            expected: total.unwrap_or_default(),
-                            actual: received,
+                    Err(error) => {
+                        return Err(GithubError::Interrupted {
+                            received,
+                            reason: read_failure(&error, self.timeout),
                         });
                     }
-                    Err(error) => return Err(error.into()),
                 };
                 if read == 0 {
                     break;
@@ -254,6 +275,36 @@ impl GithubCatalogClient {
     }
 }
 
+/// Why reading a download failed, in words: a stall names the timeout, and
+/// any other error lists its causes.
+///
+/// reqwest reports a timed-out read as "error decoding response body", which
+/// hides the cause, so a timeout is found by walking the error's causes.
+fn read_failure(error: &std::io::Error, timeout: Duration) -> String {
+    let timed_out = error.kind() == std::io::ErrorKind::TimedOut
+        || error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
+            .is_some_and(reqwest::Error::is_timeout);
+    if timed_out {
+        let seconds = timeout.as_secs();
+        return format!(
+            "no data arrived for {seconds} second{}",
+            if seconds == 1 { "" } else { "s" }
+        );
+    }
+    let mut parts = vec![error.to_string()];
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        let text = cause.to_string();
+        if !parts.iter().any(|part| part.contains(&text)) {
+            parts.push(text);
+        }
+        source = cause.source();
+    }
+    parts.join(": ")
+}
+
 /// Revalidates a cached archive against its release metadata.
 ///
 /// # Errors
@@ -285,8 +336,7 @@ fn status_error(response: reqwest::blocking::Response) -> GithubError {
     let status = response.status();
     let message = response
         .json::<ApiError>()
-        .map(|error| error.message.chars().take(200).collect())
-        .unwrap_or_default();
+        .map_or_default(|error| error.message.chars().take(200).collect());
     GithubError::Status { status, message }
 }
 
@@ -385,8 +435,7 @@ fn select_asset(release: ApiRelease) -> Result<Option<OfficialAsset>, GithubErro
             published_unix: release
                 .published_at
                 .parse::<jiff::Timestamp>()
-                .map(jiff::Timestamp::as_second)
-                .unwrap_or_default(),
+                .map_or_default(jiff::Timestamp::as_second),
         },
         download_url: asset.browser_download_url,
         size: asset.size,
@@ -770,6 +819,120 @@ mod tests {
             .unwrap_err();
         server.join().unwrap();
         assert!(matches!(error, GithubError::SizeMismatch { .. }));
+    }
+
+    /// Serves one download: the headers for a `length`-byte body, then each
+    /// chunk after its delay, then holds the connection open for `hold`.
+    fn paced_server(
+        length: usize,
+        chunks: Vec<(Duration, &'static [u8])>,
+        hold: Duration,
+    ) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n").as_bytes(),
+                )
+                .unwrap();
+            for (delay, chunk) in chunks {
+                thread::sleep(delay);
+                // The client may have given up already.
+                if stream
+                    .write_all(chunk)
+                    .and_then(|()| stream.flush())
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            thread::sleep(hold);
+        });
+        (base, handle)
+    }
+
+    fn paced_asset(url: String, size: usize) -> OfficialAsset {
+        OfficialAsset {
+            release: ReleaseMetadata {
+                id: ReleaseId("v1".into()),
+                tag: "v1".into(),
+                asset_name: "streamline-sdk-v1.zip".into(),
+                published_unix: 1,
+            },
+            download_url: url,
+            size: size as u64,
+            digest: None,
+        }
+    }
+
+    #[test]
+    fn a_stalled_download_fails_with_the_timeout_not_a_size_mismatch() {
+        let timeout = Duration::from_secs(1);
+        let (base, server) =
+            paced_server(10, vec![(Duration::ZERO, b"abc")], Duration::from_secs(4));
+        let directory = tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let error = GithubCatalogClient::for_test("test".into(), timeout)
+            .unwrap()
+            .download_with_progress(
+                &paced_asset(base, 10),
+                &directory.path().join("a.zip"),
+                |_| {},
+            )
+            .unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            matches!(&error, GithubError::Interrupted { received: 3, reason }
+                if reason.contains("no data arrived for 1 second")),
+            "{error}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_slow_steady_download_outlasts_the_timeout() {
+        let timeout = Duration::from_secs(1);
+        let pause = Duration::from_millis(400);
+        let chunk: &'static [u8] = b"0123456789";
+        // Six pauses take 2.4 seconds in total, but no single wait reaches
+        // the timeout.
+        let (base, server) = paced_server(60, vec![(pause, chunk); 6], Duration::ZERO);
+        let directory = tempdir().unwrap();
+        let destination = directory.path().join("slow.zip");
+        GithubCatalogClient::for_test("test".into(), timeout)
+            .unwrap()
+            .download_with_progress(&paced_asset(base, 60), &destination, |_| {})
+            .unwrap();
+        assert_eq!(fs::read(destination).unwrap(), chunk.repeat(6));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_release_list_that_never_answers_times_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_secs(4));
+            drop(stream);
+        });
+        let started = std::time::Instant::now();
+        let client = GithubCatalogClient::for_test(base, Duration::from_secs(1)).unwrap();
+        assert!(client.refresh(None).is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
+        server.join().unwrap();
     }
 
     #[test]

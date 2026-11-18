@@ -18,6 +18,9 @@ pub(crate) const fn signature_label(status: dlss_core::SignatureStatus) -> &'sta
         dlss_core::SignatureStatus::Untrusted => "Signed (untrusted)",
         dlss_core::SignatureStatus::Unsigned => "Unsigned",
         dlss_core::SignatureStatus::Unavailable => "Signature unavailable",
+        dlss_core::SignatureStatus::RevocationOffline => {
+            "Revocation could not be checked (offline)"
+        }
     }
 }
 

@@ -164,6 +164,7 @@ struct WorkerState {
 
 fn run(commands: &Receiver<Command>, events: &EventSink, mut roots: Vec<PathBuf>) {
     canonicalize_roots(&mut roots);
+    save_roots(&roots, events);
     let catalog_path = catalog_index_path();
     let catalog = match catalog_path
         .as_deref()
@@ -246,6 +247,7 @@ fn dispatch(command: Command, events: &EventSink, state: &mut WorkerState) -> bo
         Command::AddRoot(root) => add_root_command(&root, events, state),
         Command::RemoveRoot(root) => {
             remove_root(&mut state.roots, &root);
+            save_roots(&state.roots, events);
             scan(events, &state.roots, &mut state.games);
         }
         Command::ImportDll(path) => import_command(&path, events, state),
@@ -534,7 +536,10 @@ fn finish_game_operation(
 
 fn add_root_command(root: &std::path::Path, events: &EventSink, state: &mut WorkerState) {
     match root.canonicalize() {
-        Ok(root) if !state.roots.contains(&root) => state.roots.push(root),
+        Ok(root) if !state.roots.contains(&root) => {
+            state.roots.push(root);
+            save_roots(&state.roots, events);
+        }
         Ok(_) => {}
         Err(error) => events.send(Event::Warning(format!(
             "Could not add game folder {}: {error}",
@@ -543,6 +548,24 @@ fn add_root_command(root: &std::path::Path, events: &EventSink, state: &mut Work
     }
     scan(events, &state.roots, &mut state.games);
 }
+
+/// Saves the game folders the user added where the elevated helper reads
+/// them. The helper changes DLLs in a manual game only inside these folders.
+#[cfg(windows)]
+fn save_roots(roots: &[PathBuf], events: &EventSink) {
+    let saved = data_root()
+        .and_then(|base| dlss_core::save_custom_roots(&base, roots).map_err(WorkerError::from));
+    if let Err(error) = saved {
+        tracing::warn!(%error, "could not save the added game folders");
+        events.send(Event::Warning(format!(
+            "Could not save the list of added game folders, so changes there that need \
+             administrator rights will fail: {error}"
+        )));
+    }
+}
+
+#[cfg(not(windows))]
+fn save_roots(_roots: &[PathBuf], _events: &EventSink) {}
 
 /// Drops a folder from the scan list by its stored path. The path is not
 /// canonicalized again: a deleted folder cannot be, and that is exactly the
@@ -1109,33 +1132,9 @@ fn execute_game_plan(
         );
     }
     let (result, warning) = execute_with_elevation(game, base, plan);
-    let changed = result
-        .swaps
-        .iter()
-        .filter(|swap| swap.result.is_ok())
-        .count();
-    let undo_swaps = plan
-        .swaps
-        .iter()
-        .zip(&result.swaps)
-        .filter_map(|(swap, outcome)| {
-            let installed = outcome.result.as_ref().ok()?;
-            let backup = outcome.backup.as_ref()?;
-            Some(dlss_core::PlannedSwap {
-                game: swap.game.clone(),
-                installation: swap.installation.clone(),
-                target_path: swap.target_path.clone(),
-                expected_sha256: installed.sha256,
-                source_path: backup.content_path.clone(),
-                source_sha256: backup.sha256,
-                comparison: match swap.comparison {
-                    dlss_core::Comparison::Upgrade => dlss_core::Comparison::Downgrade,
-                    dlss_core::Comparison::Downgrade => dlss_core::Comparison::Upgrade,
-                    other => other,
-                },
-            })
-        })
-        .collect::<Vec<_>>();
+    let warning = join_warnings(warning, unconfirmed_warning(&result));
+    let changed = result.swaps.iter().filter(|swap| replaced(swap)).count();
+    let undo_swaps = undo_swaps(plan, &result);
     let can_undo = !undo_swaps.is_empty();
     UpgradeReport {
         changed,
@@ -1147,6 +1146,91 @@ fn execute_game_plan(
             nonce: operation_nonce(),
             swaps: undo_swaps,
         }),
+    }
+}
+
+/// Whether a swap wrote its new DLL, confirmed or not.
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "only the Windows DLL replacement path counts and undoes swaps"
+    )
+)]
+fn replaced(swap: &dlss_core::SwapResult) -> bool {
+    swap.result.is_ok() || swap.unconfirmed
+}
+
+/// The swaps that put back the backup of every DLL `plan` replaced.
+#[cfg_attr(
+    all(not(windows), not(test)),
+    expect(
+        dead_code,
+        reason = "only the Windows DLL replacement path counts and undoes swaps"
+    )
+)]
+fn undo_swaps(
+    plan: &dlss_core::OperationPlan,
+    result: &dlss_core::BatchResult,
+) -> Vec<dlss_core::PlannedSwap> {
+    plan.swaps
+        .iter()
+        .zip(&result.swaps)
+        .filter_map(|(swap, outcome)| {
+            let backup = outcome.backup.as_ref()?;
+            // A swap that could not be read back most likely wrote the new
+            // DLL. The undo checks for that hash before it restores anything.
+            let installed = match &outcome.result {
+                Ok(installed) => installed.sha256,
+                Err(_) if outcome.unconfirmed => swap.source_sha256,
+                Err(_) => return None,
+            };
+            Some(dlss_core::PlannedSwap {
+                game: swap.game.clone(),
+                installation: swap.installation.clone(),
+                target_path: swap.target_path.clone(),
+                expected_sha256: installed,
+                source_path: backup.content_path.clone(),
+                source_sha256: backup.sha256,
+                comparison: match swap.comparison {
+                    dlss_core::Comparison::Upgrade => dlss_core::Comparison::Downgrade,
+                    dlss_core::Comparison::Downgrade => dlss_core::Comparison::Upgrade,
+                    other => other,
+                },
+            })
+        })
+        .collect()
+}
+
+/// Says which DLLs were replaced but could not be read back afterwards.
+#[cfg(windows)]
+fn unconfirmed_warning(result: &dlss_core::BatchResult) -> Option<String> {
+    let unconfirmed: Vec<_> = result
+        .swaps
+        .iter()
+        .filter(|swap| swap.unconfirmed)
+        .collect();
+    let first = unconfirmed.first()?;
+    let reason = first.result.as_ref().err().map_or("", String::as_str);
+    Some(if unconfirmed.len() == 1 {
+        format!(
+            "A DLL was replaced, but DLSS Updater could not read it back to confirm: {reason}. \
+             Undo is still available."
+        )
+    } else {
+        format!(
+            "{} DLLs were replaced, but DLSS Updater could not read them back to confirm: \
+             {reason}. Undo is still available.",
+            unconfirmed.len()
+        )
+    })
+}
+
+#[cfg(windows)]
+fn join_warnings(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(first), Some(second)) => Some(format!("{first} {second}")),
+        (first, second) => first.or(second),
     }
 }
 
@@ -1254,6 +1338,9 @@ fn run_helper_plan<T: serde::de::DeserializeOwned>(
 fn elevation_error(error: dlss_core::CoreError) -> WorkerError {
     match error {
         dlss_core::CoreError::Cancelled => WorkerError::Elevation("elevation was cancelled".into()),
+        // The message already says what went wrong; "elevation failed" is
+        // prefix enough.
+        dlss_core::CoreError::Validation(message) => WorkerError::Elevation(message),
         other => WorkerError::Elevation(other.to_string()),
     }
 }
@@ -1280,11 +1367,12 @@ fn undo_game(game: &GameInstall, plan: &dlss_core::OperationPlan) -> WorkerResul
     let base = data_root()?;
     // An update that needed the helper needs it to undo as well.
     let (result, warning) = execute_with_elevation(game, &base, plan);
+    let warning = join_warnings(warning, unconfirmed_warning(&result));
     let remaining: Vec<_> = plan
         .swaps
         .iter()
         .zip(&result.swaps)
-        .filter(|(_, outcome)| outcome.result.is_err())
+        .filter(|(_, outcome)| !replaced(outcome))
         .map(|(swap, _)| swap.clone())
         .collect();
     let failed = remaining.len();
@@ -1355,8 +1443,7 @@ fn operation_nonce() -> String {
 fn now_nanos() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default()
+        .map_or_default(|duration| duration.as_nanos())
 }
 
 #[cfg(windows)]
@@ -1435,6 +1522,72 @@ mod tests {
 
         assets.clear();
         assert!(merge_catalog_refresh(&mut assets, &mut catalog, None, offline()).is_err());
+    }
+
+    #[test]
+    fn an_unconfirmed_swap_counts_as_changed_and_can_be_undone() {
+        let planned = |name: &str| dlss_core::PlannedSwap {
+            game: GameId("g".into()),
+            installation: dlss_core::DllInstallationId(name.into()),
+            target_path: PathBuf::from(name),
+            expected_sha256: [1; 32],
+            source_path: PathBuf::from("source"),
+            source_sha256: [2; 32],
+            comparison: dlss_core::Comparison::Upgrade,
+        };
+        let backup = dlss_core::BackupRecord {
+            sha256: [1; 32],
+            content_path: PathBuf::from("backup"),
+            original_path: PathBuf::from("target"),
+            version: None,
+            created_unix: 1,
+        };
+        let outcome = |name: &str, result, backup, unconfirmed| dlss_core::SwapResult {
+            installation: dlss_core::DllInstallationId(name.into()),
+            result,
+            backup,
+            denied: false,
+            unconfirmed,
+        };
+        let plan = dlss_core::OperationPlan {
+            nonce: "n".into(),
+            swaps: vec![
+                planned("confirmed"),
+                planned("unconfirmed"),
+                planned("failed"),
+            ],
+        };
+        let installed = dlss_core::DllStructure {
+            version: None,
+            sha256: [3; 32],
+            x86_64: true,
+        };
+        let result = dlss_core::BatchResult {
+            swaps: vec![
+                outcome("confirmed", Ok(installed), Some(backup.clone()), false),
+                outcome("unconfirmed", Err("locked".into()), Some(backup), true),
+                outcome("failed", Err("stale".into()), None, false),
+            ],
+        };
+        let changed: Vec<_> = result
+            .swaps
+            .iter()
+            .filter(|swap| replaced(swap))
+            .map(|swap| swap.installation.0.as_str())
+            .collect();
+        assert_eq!(changed, ["confirmed", "unconfirmed"]);
+        let undo = undo_swaps(&plan, &result);
+        let expected: Vec<_> = undo
+            .iter()
+            .map(|swap| (swap.installation.0.as_str(), swap.expected_sha256))
+            .collect();
+        // The undo of a confirmed swap expects what was read back; the undo
+        // of an unconfirmed one expects the DLL it wrote.
+        assert_eq!(expected, [("confirmed", [3; 32]), ("unconfirmed", [2; 32])]);
+        assert!(
+            undo.iter()
+                .all(|swap| swap.comparison == dlss_core::Comparison::Downgrade)
+        );
     }
 
     #[test]

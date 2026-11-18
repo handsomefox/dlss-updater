@@ -159,15 +159,16 @@ pub fn display_path(path: &Path) -> String {
 }
 
 /// Whether two paths name the same file the way Windows compares them: with
-/// or without the `\\?\` prefix a canonicalized path carries, and without
-/// regard to ASCII case.
+/// or without the `\\?\` prefix a canonicalized path carries, with either
+/// separator, and without regard to ASCII case.
 ///
 /// The elevated helper canonicalizes the targets it swaps, so the backups it
 /// records name `\\?\C:\...` while discovery reports `C:\...`. Comparing
 /// those exactly would hide every elevated backup from restore.
 #[must_use]
 pub fn same_path(left: &Path, right: &Path) -> bool {
-    display_path(left).eq_ignore_ascii_case(&display_path(right))
+    let normalize = |path: &Path| display_path(path).replace('/', "\\");
+    normalize(left).eq_ignore_ascii_case(&normalize(right))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -216,6 +217,10 @@ pub enum SignatureStatus {
     Untrusted,
     Unsigned,
     Unavailable,
+    /// The signature checks out except that Windows could not reach the
+    /// certificate revocation service, usually because the PC is offline.
+    /// Strict checks still treat the file as untrusted.
+    RevocationOffline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -420,6 +425,11 @@ pub struct SwapResult {
     /// that retrying under elevation may succeed.
     #[serde(default)]
     pub denied: bool,
+    /// True when the new DLL was written but could not be read back to
+    /// confirm it. `result` holds the read error and `backup` the original,
+    /// so the change can still be undone.
+    #[serde(default)]
+    pub unconfirmed: bool,
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct BatchResult {
@@ -456,6 +466,9 @@ pub struct BackupLoadReport {
     pub usable: Vec<BackupRecord>,
     pub rejected: Vec<RejectedBackup>,
     pub offline_revocation_fallbacks: usize,
+    /// Hashes of usable backups without a valid NVIDIA signature. They can be
+    /// restored only to their own original path, after a warning.
+    pub not_nvidia_signed: std::collections::BTreeSet<[u8; 32]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -506,6 +519,23 @@ mod tests {
         assert!(!same(
             r"C:\Games\nvngx_dlss.dll",
             r"D:\Games\nvngx_dlss.dll"
+        ));
+    }
+
+    #[test]
+    fn same_path_ignores_the_separator() {
+        let same = |left: &str, right: &str| same_path(Path::new(left), Path::new(right));
+        assert!(same(
+            "C:/Games/Cyberpunk/nvngx_dlss.dll",
+            r"C:\Games\Cyberpunk\nvngx_dlss.dll"
+        ));
+        assert!(same(
+            r"\\?\C:\Games\Cyberpunk\nvngx_dlss.dll",
+            r"c:/games\cyberpunk/NVNGX_DLSS.DLL"
+        ));
+        assert!(!same(
+            "C:/Games/A/nvngx_dlss.dll",
+            r"C:\Games\B\nvngx_dlss.dll"
         ));
     }
 

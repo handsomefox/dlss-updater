@@ -177,7 +177,7 @@ pub fn steam_library_paths(contents: &str) -> Vec<PathBuf> {
         if key.eq_ignore_ascii_case("path")
             || (key.bytes().all(|byte| byte.is_ascii_digit()) && looks_like_path)
         {
-            paths.push(PathBuf::from(value.replace("\\\\", "\\")));
+            paths.push(PathBuf::from(value));
         }
     }
     deduplicate_roots(paths)
@@ -295,9 +295,16 @@ fn token_value<'a>(tokens: &'a [String], key: &str) -> Option<&'a str> {
         .map(|pair| pair[1].as_str())
 }
 
+/// Splits `KeyValues` text into its quoted strings, decoding escapes the way
+/// Steam writes them: `\\` is one backslash and `\"` is a quote.
+///
+/// Each escape is decoded as it is read, left to right, so the second
+/// backslash of `\\` never starts another escape. `"E:\\"` is the path `E:\`,
+/// and the quote after it still ends the string. Any other backslash is kept
+/// as it is.
 fn quoted_tokens(contents: &str) -> Vec<String> {
     let mut tokens = Vec::new();
-    let mut chars = contents.chars().peekable();
+    let mut chars = contents.chars();
     while let Some(character) = chars.next() {
         if character != '"' {
             continue;
@@ -306,10 +313,14 @@ fn quoted_tokens(contents: &str) -> Vec<String> {
         while let Some(character) = chars.next() {
             match character {
                 '"' => break,
-                '\\' if chars.peek() == Some(&'"') => {
-                    chars.next();
-                    token.push('"');
-                }
+                '\\' => match chars.next() {
+                    Some(escaped @ ('\\' | '"')) => token.push(escaped),
+                    Some(other) => {
+                        token.push('\\');
+                        token.push(other);
+                    }
+                    None => token.push('\\'),
+                },
                 other => token.push(other),
             }
         }
@@ -349,9 +360,16 @@ struct EpicManifest {
     catalog_item_id: String,
     #[serde(default)]
     app_name: String,
+    /// The game a DLC or add-on belongs to. A game names itself here.
+    #[serde(default)]
+    main_game_app_name: String,
 }
 
 /// Reads Epic `.item` manifests. A malformed entry never hides valid siblings.
+///
+/// A DLC has its own manifest that points at its game's folder. Those are
+/// skipped, and so is any second manifest for a folder already listed, so a
+/// game shows up once.
 #[must_use]
 pub fn epic_manifests_with_errors(directory: &Path) -> ManifestScan<GameInstall> {
     let entries = match fs::read_dir(directory) {
@@ -381,17 +399,38 @@ pub fn epic_manifests_with_errors(directory: &Path) -> ManifestScan<GameInstall>
             continue;
         }
         match read_epic_manifest(&path) {
-            Ok(game) => items.push(game),
+            Ok(Some(game)) => items.push(game),
+            Ok(None) => tracing::info!(path = %path.display(), "skipping Epic add-on manifest"),
             Err(error) => errors.push(format!("{}: {error}", path.display())),
         }
     }
+    // `read_dir` order is arbitrary. Sorting keeps the same manifest when two
+    // name one folder.
+    items.sort_by(|left, right| left.id.cmp(&right.id));
+    let mut seen = HashSet::new();
+    items.retain(|game| seen.insert(root_key(&game.root)));
     ManifestScan { items, errors }
 }
 
-fn read_epic_manifest(path: &Path) -> Result<GameInstall, String> {
+/// A folder's identity for spotting duplicates: its canonical path when it
+/// exists, otherwise the path as written, without regard to case or
+/// separator.
+fn root_key(root: &Path) -> String {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    dlss_core::display_path(&root)
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_ascii_lowercase()
+}
+
+/// Reads one Epic manifest, or `None` for a DLC or add-on of another game.
+fn read_epic_manifest(path: &Path) -> Result<Option<GameInstall>, String> {
     let file = fs::File::open(path).map_err(|error| error.to_string())?;
     let manifest: EpicManifest =
         serde_json::from_reader(file).map_err(|error| error.to_string())?;
+    if !manifest.main_game_app_name.is_empty() && manifest.main_game_app_name != manifest.app_name {
+        return Ok(None);
+    }
     if manifest.install_location.as_os_str().is_empty() {
         return Err("install location is missing".into());
     }
@@ -403,14 +442,14 @@ fn read_epic_manifest(path: &Path) -> Result<GameInstall, String> {
     if stable.is_empty() {
         return Err("catalog and app identifiers are missing".into());
     }
-    Ok(GameInstall {
+    Ok(Some(GameInstall {
         id: GameId(format!("epic:{stable}")),
         name: manifest.display_name,
         store: StoreKind::Epic,
         root: manifest.install_location,
         dlls: Vec::new(),
         inspection_errors: 0,
-    })
+    }))
 }
 
 /// Creates a stable manual-game record from a canonical directory.
@@ -472,6 +511,36 @@ mod tests {
         assert_eq!(
             steam_library_paths(text),
             [PathBuf::from(r"C:\Steam"), PathBuf::from(r"D:\Games")]
+        );
+    }
+
+    #[test]
+    fn a_drive_root_library_does_not_swallow_the_next_value() {
+        let text = r#""libraryfolders"
+        {
+            "1" { "path" "E:\\" "label" "" }
+            "2" { "path" "F:\\SteamLibrary" }
+        }"#;
+        assert_eq!(
+            steam_library_paths(text),
+            [PathBuf::from(r"E:\"), PathBuf::from(r"F:\SteamLibrary")]
+        );
+    }
+
+    #[test]
+    fn keeps_both_backslashes_of_a_unc_library() {
+        let text = r#""path" "\\\\nas\\games\\Steam""#;
+        assert_eq!(
+            steam_library_paths(text),
+            [PathBuf::from(r"\\nas\games\Steam")]
+        );
+    }
+
+    #[test]
+    fn decodes_escaped_quotes_and_keeps_other_backslashes() {
+        assert_eq!(
+            quoted_tokens(r#""say \"hi\"" "C:\Games""#),
+            [r#"say "hi""#, r"C:\Games"]
         );
     }
 
@@ -558,15 +627,40 @@ mod tests {
     }
 
     #[test]
+    fn epic_skips_add_ons_and_second_manifests_for_one_folder() {
+        let directory = tempfile::tempdir().unwrap();
+        let game = directory.path().join("Game");
+        fs::create_dir_all(&game).unwrap();
+        let location = serde_json::to_string(&game).unwrap();
+        let manifest = |file: &str, catalog: &str, app: &str, main: &str| {
+            fs::write(
+                directory.path().join(file),
+                format!(
+                    r#"{{"DisplayName":"{file}","InstallLocation":{location},"CatalogItemId":"{catalog}","AppName":"{app}","MainGameAppName":"{main}"}}"#
+                ),
+            )
+            .unwrap();
+        };
+        manifest("a.item", "game", "Game", "Game");
+        manifest("b.item", "dlc", "GameDlc", "Game");
+        // Another manifest for the same folder, which the game's id sorts after.
+        manifest("c.item", "zzz", "Other", "");
+        let scan = epic_manifests_with_errors(directory.path());
+        assert_eq!(scan.errors, Vec::<String>::new());
+        let ids: Vec<_> = scan.items.iter().map(|game| game.id.0.as_str()).collect();
+        assert_eq!(ids, ["epic:game"]);
+    }
+
+    #[test]
     fn steam_manifest_failures_are_reported() {
         let directory = tempfile::tempdir().unwrap();
         let missing = steam_manifests_with_errors(&directory.path().join("missing"));
-        assert!(missing.items.is_empty());
+        assert_eq!(missing.items, Vec::new());
         assert_eq!(missing.errors.len(), 1);
 
         fs::write(directory.path().join("appmanifest_1.acf"), "invalid").unwrap();
         let malformed = steam_manifests_with_errors(directory.path());
-        assert!(malformed.items.is_empty());
+        assert_eq!(malformed.items, Vec::new());
         assert_eq!(malformed.errors.len(), 1);
     }
 
@@ -584,7 +678,7 @@ mod tests {
         )
         .unwrap();
         let scan = steam_manifests_with_errors(directory.path());
-        assert!(scan.errors.is_empty());
+        assert_eq!(scan.errors, Vec::<String>::new());
         assert_eq!(scan.items.len(), 1);
         assert_eq!(scan.items[0].0, "123456");
         assert_eq!(scan.items[0].1, "Example Game");
@@ -605,8 +699,8 @@ mod tests {
         )
         .unwrap();
         let scan = steam_manifests_with_errors(directory.path());
-        assert!(scan.items.is_empty());
-        assert!(scan.errors.is_empty());
+        assert_eq!(scan.items, Vec::new());
+        assert_eq!(scan.errors, Vec::<String>::new());
     }
 
     #[test]

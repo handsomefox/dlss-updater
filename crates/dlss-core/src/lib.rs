@@ -3,6 +3,7 @@
 mod game_risk;
 mod imports;
 mod model;
+mod sources;
 mod tools;
 mod traits;
 mod workflow;
@@ -10,6 +11,7 @@ mod workflow;
 pub use game_risk::*;
 pub use imports::*;
 pub use model::*;
+pub use sources::*;
 pub use tools::*;
 pub use traits::*;
 pub use workflow::*;
@@ -18,6 +20,5 @@ pub use workflow::*;
 pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
-        .unwrap_or_default()
+        .map_or_default(|duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX))
 }
