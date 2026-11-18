@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "dlss-app"
-version = "1.4.10"
+version = "1.5.0"
 dependencies = [
  "app-diagnostics",
  "app-folders",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "dlss-catalog"
-version = "1.4.10"
+version = "1.5.0"
 dependencies = [
  "dlss-core",
  "jiff",
@@ -652,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "dlss-core"
-version = "1.4.10"
+version = "1.5.0"
 dependencies = [
  "atomic-write-file",
  "serde",
@@ -664,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "dlss-platform"
-version = "1.4.10"
+version = "1.5.0"
 dependencies = [
  "app-elevation",
  "app-folders",

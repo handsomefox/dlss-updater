@@ -2,6 +2,46 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.5.0
+
+- Opening DLSS Updater while it is already open brings the open window to the front instead of
+  starting a second copy. Two copies could overwrite each other's list of added folders.
+- **Restore previous** under the DLSS indicator setting is greyed out when the earlier value is not
+  one DLSS Updater sets, instead of failing after the administrator prompt.
+- Change DLLs in a protected folder, such as Program Files, from a standard Windows account. When
+  you typed an administrator's password at the Windows prompt, the administrator step looked for
+  its files in the administrator's folder and rejected every change. If it still cannot find your
+  folder, it now says to sign in with an administrator account.
+- Restore a backup of a DLL that is not signed by NVIDIA, such as a file a game shipped modified.
+  Those backups were hidden. The restore list marks one **not signed by NVIDIA**, the review warns
+  before you apply it, and it can go back only to the file it came from.
+- List the backups that changes with administrator rights made for Steam games. Steam records its
+  folder with forward slashes, and those paths did not match the backups.
+- When a DLL is replaced but cannot be read back afterwards, for example because a launcher opened
+  it, the change counts as made and **Undo** stays available. It counted as failed, and the undo
+  was lost.
+- When Windows cannot reach the certificate revocation service, a DLL's signature shows
+  **Revocation could not be checked (offline)** instead of **Signed (untrusted)**. An import
+  refused for that reason says so too. Connect to the internet and try again.
+- Importing a DLL checks the file name NVIDIA recorded inside it. A DLL renamed to another DLL's
+  name, such as Frame Generation saved as `nvngx_dlss.dll`, is refused, so it cannot replace the
+  wrong DLL. An earlier import like that is no longer offered.
+- Find games in a Steam library at the root of a drive, such as `E:\`, and in a library on a
+  network share. The library listed after a drive-root library was missed, and a network path
+  lost one of its leading backslashes.
+- List each Epic game once. A game's DLC and add-ons showed up as more copies of the game.
+- A GitHub request that stops answering fails after 30 seconds. It could hold up downloads and
+  updates for 30 minutes. A download fails only after 30 seconds without any data, however long
+  it takes in total, and its error names the cause instead of "download size mismatch".
+- Two copies of the app, or the app and its administrator step, no longer lose each other's
+  backup or import records when both save at the same time.
+- The administrator step installs a DLL only when the release, the import list, or the backup
+  history lists it for that file. It changes an added game folder only when the folder is in
+  **Game folders**.
+- **Restore previous** for the DLSS indicator restores only the values DLSS Updater can set. It
+  refuses any other earlier value instead of writing it back.
+- Build with Rust 1.100.0.
+
 ## 1.4.10
 
 - Apply an imported DLL or restore a backup to a game in a protected folder, such as Program Files,
