@@ -10,7 +10,7 @@ The workspace is layered so that everything portable stays testable on Linux:
 - `dlss-catalog` downloads and validates official Streamline release archives.
 - `dlss-platform` implements the core traits, and confines Win32 and registry calls to `windows.rs`.
 - `dlss-app` is the egui desktop binary, and the only crate that depends on egui.
-- The shared crates come from [handsomefox/app-internals](https://github.com/handsomefox/app-internals), pinned to a tag: `app-update` updates the app from its GitHub releases, `app-update-ui` draws the update dialog's content, `app-diagnostics` writes the log files, and `app-folders` finds `%LOCALAPPDATA%` and opens folders. That repository's `AGENTS.md` covers changing them. `ui/update.rs` holds this app's chip, its dialog, and the `Look` that themes the content.
+- The shared crates come from [handsomefox/app-internals](https://github.com/handsomefox/app-internals), pinned to a tag: `app-update` updates the app from its GitHub releases, `app-update-ui` draws the update dialog's content, `app-diagnostics` writes the log files, `app-folders` finds `%LOCALAPPDATA%` and opens folders, `app-elevation` starts the elevated helper, and `app-instance` keeps one window open. That repository's `AGENTS.md` covers changing them. `ui/update.rs` holds this app's chip, its dialog, and the `Look` that themes the content.
 
 Keep platform-neutral behavior in `dlss-core` and Windows APIs in `dlss-platform`. A new Win32 call goes in `windows.rs`, not wherever it is convenient, because that division is the only reason the test suite runs off Windows at all.
 
