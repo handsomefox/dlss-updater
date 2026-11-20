@@ -27,7 +27,7 @@ dlss-platform = { version = "=1.5.0", path = "../dlss-platform" }
 eframe.workspace = true
 egui_extras.workspace = true
 jiff.workspace = true
-rfd = "=0.17.2"
+rfd = "=0.18.0"
 serde.workspace = true
 tracing.workspace = true
 thiserror.workspace = true
