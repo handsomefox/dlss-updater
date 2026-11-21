@@ -2,6 +2,12 @@
 
 Releases before 1.1.3 are listed on the [releases page](https://github.com/handsomefox/dlss-updater/releases).
 
+## 1.5.1
+
+- On a game's page in a narrow window, the folder path and the DLL counts no longer run under the
+  **Update DLSS** and **Update all DLLs** buttons. The path is shortened to fit, and you can hover
+  it to see all of it. A long game name wraps onto a second line.
+
 ## 1.5.0
 
 - Opening DLSS Updater while it is already open brings the open window to the front instead of
