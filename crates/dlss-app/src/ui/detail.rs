@@ -66,7 +66,6 @@ impl DlssApp {
     /// The page title: back link, game name, where it lives, and the two
     /// update actions, closed off from the DLL table by a rule.
     fn detail_header(&self, ui: &mut egui::Ui, index: usize, actions: &mut Vec<Action>) {
-        let game = &self.games[index];
         if ui
             .add(
                 egui::Button::new(widgets::colored_icon_label(
@@ -82,68 +81,29 @@ impl DlssApp {
         {
             actions.push(Action::ShowLibrary);
         }
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(&game.name).font(theme::semibold_font(24.0)));
-                    widgets::badge(ui, game.store, theme::INFO);
-                    if let Some(risk_name) = game.known_risk {
-                        widgets::chip(ui, icons::WARNING, "Known risk", theme::WARNING)
-                            .on_hover_text(format!(
-                                "{risk_name}: {}",
-                                dlss_core::KNOWN_GAME_RISK_WARNING
-                            ));
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    let path = dlss_core::display_path(&game.root);
-                    ui.scope(|ui| {
-                        ui.set_max_width((ui.available_width() - 420.0).max(200.0));
-                        ui.add(
-                            egui::Label::new(
-                                egui::RichText::new(&path)
-                                    .monospace()
-                                    .size(12.0)
-                                    .color(theme::TEXT_MUTED),
-                            )
-                            .truncate(),
-                        )
-                        .on_hover_text(&path);
-                    });
-                    if ui
-                        .add(
-                            egui::Button::new(widgets::colored_icon_label(
-                                icons::FOLDER_OPEN,
-                                "Open",
-                                theme::TEXT_MUTED,
-                                12.5,
-                            ))
-                            .frame(false),
-                        )
-                        .on_hover_text("Open in File Explorer")
-                        .clicked()
-                    {
-                        crate::diagnostics::open_existing(&game.root);
-                    }
-                    let mut facts = vec![super::toast::plural(game.dlls, "NVIDIA DLL")];
-                    if game.upgrades > 0 {
-                        facts.push(super::toast::plural(game.upgrades, "update"));
-                    }
-                    if let Some(operation) = &game.last_operation {
-                        facts.push(operation.clone());
-                    }
-                    ui.label(
-                        egui::RichText::new(format!("· {}", facts.join(" · ")))
-                            .size(12.5)
-                            .color(theme::TEXT_MUTED),
-                    );
-                });
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                self.detail_actions(ui, index, actions);
-            });
-        });
+        // The buttons are laid out first and the title block gets the width
+        // they leave, so a narrow window wraps the title block's text
+        // instead of running it under the buttons. The buttons are centered
+        // on the title block, whose height is known only after it is drawn,
+        // so it is remembered from the last frame.
+        let height_id = egui::Id::unique("detail_header_height");
+        let height = ui
+            .data(|data| data.get_temp(height_id))
+            .unwrap_or(ui.spacing().interact_size.y);
+        let (title_height, ()) = egui::Sides::new().height(height).shrink_left().wrap().show(
+            ui,
+            |ui| {
+                ui.vertical(|ui| self.detail_title(ui, index))
+                    .response
+                    .rect
+                    .height()
+            },
+            |ui| self.detail_actions(ui, index, actions),
+        );
+        if (title_height - height).abs() > 0.5 {
+            ui.data_mut(|data| data.insert_temp(height_id, title_height));
+            ui.ctx().request_discard("detail header height changed");
+        }
         ui.add_space(10.0);
         let rule = ui.available_rect_before_wrap();
         ui.painter().hline(
@@ -152,6 +112,75 @@ impl DlssApp {
             egui::Stroke::new(1.0, theme::STROKE),
         );
         ui.add_space(8.0);
+    }
+
+    /// The game's name and badges, and below them where it lives and what
+    /// it has.
+    fn detail_title(&self, ui: &mut egui::Ui, index: usize) {
+        // The path gives way to the facts after it, down to this width,
+        // before the facts wrap.
+        const MIN_PATH_WIDTH: f32 = 160.0;
+        let game = &self.games[index];
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(&game.name).font(theme::semibold_font(24.0)));
+            widgets::badge(ui, game.store, theme::INFO);
+            if let Some(risk_name) = game.known_risk {
+                widgets::chip(ui, icons::WARNING, "Known risk", theme::WARNING).on_hover_text(
+                    format!("{risk_name}: {}", dlss_core::KNOWN_GAME_RISK_WARNING),
+                );
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let path = dlss_core::display_path(&game.root);
+            let open =
+                widgets::colored_icon_label(icons::FOLDER_OPEN, "Open", theme::TEXT_MUTED, 12.5);
+            let mut facts = vec![super::toast::plural(game.dlls, "NVIDIA DLL")];
+            if game.upgrades > 0 {
+                facts.push(super::toast::plural(game.upgrades, "update"));
+            }
+            if let Some(operation) = &game.last_operation {
+                facts.push(operation.clone());
+            }
+            let facts = egui::RichText::new(format!("· {}", facts.join(" · ")))
+                .size(12.5)
+                .color(theme::TEXT_MUTED);
+            let unwrapped_width = |text: egui::WidgetText| {
+                text.into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Extend),
+                    f32::INFINITY,
+                    egui::TextStyle::Body,
+                )
+                .size()
+                .x
+            };
+            let after_path = unwrapped_width(open.clone())
+                + 2.0 * ui.spacing().button_padding.x
+                + unwrapped_width(facts.clone().into())
+                + 2.0 * ui.spacing().item_spacing.x;
+            ui.scope(|ui| {
+                ui.set_max_width((ui.available_width() - after_path).max(MIN_PATH_WIDTH));
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&path)
+                            .monospace()
+                            .size(12.0)
+                            .color(theme::TEXT_MUTED),
+                    )
+                    .truncate(),
+                )
+                .on_hover_text(&path);
+            });
+            if ui
+                .add(egui::Button::new(open).frame(false))
+                .on_hover_text("Open in File Explorer")
+                .clicked()
+            {
+                crate::diagnostics::open_existing(&game.root);
+            }
+            ui.label(facts);
+        });
     }
 
     /// Update buttons at the right of the game header, or a spinner while
